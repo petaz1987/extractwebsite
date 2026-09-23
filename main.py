@@ -238,6 +238,22 @@ def extract_web_content(url):
     }
 
 
+def project_response(result, mode):
+    """Return either the backwards-compatible full response or its agent projection."""
+    if mode != "agent":
+        return result
+    fields = (
+        "url",
+        "requested_url",
+        "title",
+        "meta_description",
+        "main_text",
+        "content_type",
+        "status_code",
+    )
+    return {field: result[field] for field in fields}
+
+
 def create_app(token=None):
     configured_token = token if token is not None else __import__("os").environ.get("EXTRACT_API_TOKEN")
     if not configured_token:
@@ -257,6 +273,13 @@ def create_app(token=None):
         if scheme.lower() != "bearer" or not supplied or not hmac.compare_digest(supplied, app.config["EXTRACT_API_TOKEN"]):
             return _safe_error("unauthorized", "Valid bearer authentication is required.", 401)
 
+        modes = request.args.getlist("mode")
+        if len(modes) > 1:
+            return _safe_error("invalid_mode", "Unsupported extraction mode.", 400)
+        mode = modes[0] if modes else ""
+        if mode and mode != "agent":
+            return _safe_error("invalid_mode", "Unsupported extraction mode.", 400)
+
         urls = request.args.getlist("url")
         if len(urls) != 1 or not urls[0].strip():
             return _safe_error("invalid_url", "Provide exactly one non-empty url query parameter.", 400)
@@ -268,7 +291,7 @@ def create_app(token=None):
             # Avoid formatting arbitrary upstream exception strings, which may contain URLs.
             LOG.error("Unexpected extraction failure (%s)", type(exc).__name__)
             return _safe_error("upstream_fetch_failed", "The upstream page could not be fetched.", 502)
-        return jsonify(result)
+        return jsonify(project_response(result, mode))
 
     return app
 

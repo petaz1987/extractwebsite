@@ -24,11 +24,14 @@ Requires `Authorization: Bearer <EXTRACT_API_TOKEN>`. The service returns a JSON
 - `raw_html`: compatibility field, capped at 100,000 characters; `main_text` is preferred
 - `content_type`, `status_code`
 
+Add the optional `mode=agent` query parameter for LLM/agent consumers. This compact response includes only `url`, `requested_url`, `title`, `meta_description`, `main_text`, `content_type`, and `status_code`, avoiding raw HTML and the link inventory in model context. Omitting `mode` preserves the full response; unsupported or duplicate mode parameters return HTTP 400.
+
 Example:
 
 ```sh
 curl --get 'https://YOUR-RENDER-HOST/extract' \
   --data-urlencode 'url=https://example.com/article' \
+  --data-urlencode 'mode=agent' \
   -H 'Authorization: Bearer YOUR_CONFIGURED_TOKEN'
 ```
 
