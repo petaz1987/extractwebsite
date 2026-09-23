@@ -22,7 +22,9 @@ def test_authentication_and_health(client, monkeypatch):
     monkeypatch.setattr(main, "extract_web_content", lambda url: {"url": url})
     assert client.get("/health").status_code == 200
     assert client.get("/extract?url=https://example.com").status_code == 401
+    assert client.get("/extract?url=https://example.com&mode=agent").status_code == 401
     assert client.get("/extract?url=https://example.com", headers={"Authorization": "Bearer wrong"}).status_code == 401
+    assert client.get("/extract?url=https://example.com&mode=agent", headers={"Authorization": "Bearer wrong"}).status_code == 401
     response = client.get("/extract?url=https://example.com", headers={"Authorization": "Bearer test-secret"})
     assert response.status_code == 200
 
@@ -204,6 +206,54 @@ def test_exactly_one_url_parameter_required(client):
     headers = {"Authorization": "Bearer test-secret"}
     assert client.get("/extract", headers=headers).status_code == 400
     assert client.get("/extract?url=https://a.example&url=https://b.example", headers=headers).status_code == 400
+
+
+def test_response_modes_preserve_full_payload_and_project_agent_fields(client, monkeypatch):
+    full_result = {
+        "url": "https://example.com/final",
+        "requested_url": "https://example.com/start",
+        "title": "Example",
+        "meta_description": "Description",
+        "main_text": "Article text",
+        "links": [{"text": "Read", "href": "https://example.com/read"}],
+        "raw_html": "<html>page</html>",
+        "content_type": "text/html",
+        "status_code": 200,
+    }
+    monkeypatch.setattr(main, "extract_web_content", lambda url: full_result)
+    headers = {"Authorization": "Bearer test-secret"}
+
+    full_response = client.get("/extract?url=https://example.com", headers=headers)
+    assert full_response.status_code == 200
+    assert full_response.get_json() == full_result
+    assert {"main_text", "links", "raw_html", "title", "meta_description"}.issubset(full_response.get_json())
+
+    agent_response = client.get("/extract?url=https://example.com&mode=agent", headers=headers)
+    assert agent_response.status_code == 200
+    assert agent_response.get_json() == {
+        "url": "https://example.com/final",
+        "requested_url": "https://example.com/start",
+        "title": "Example",
+        "meta_description": "Description",
+        "main_text": "Article text",
+        "content_type": "text/html",
+        "status_code": 200,
+    }
+    assert "raw_html" not in agent_response.get_json()
+    assert "links" not in agent_response.get_json()
+
+
+def test_unsupported_or_duplicate_modes_are_rejected(client, monkeypatch):
+    monkeypatch.setattr(main, "extract_web_content", lambda url: {"url": url})
+    headers = {"Authorization": "Bearer test-secret"}
+
+    unsupported = client.get("/extract?url=https://example.com&mode=compact", headers=headers)
+    assert unsupported.status_code == 400
+    assert unsupported.get_json() == {"error": {"code": "invalid_mode", "message": "Unsupported extraction mode."}}
+
+    duplicate = client.get("/extract?url=https://example.com&mode=agent&mode=agent", headers=headers)
+    assert duplicate.status_code == 400
+    assert duplicate.get_json() == {"error": {"code": "invalid_mode", "message": "Unsupported extraction mode."}}
 
 
 def test_startup_requires_token(monkeypatch):
