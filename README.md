@@ -19,7 +19,7 @@ Requires `Authorization: Bearer <EXTRACT_API_TOKEN>`. The service returns a JSON
 - `url`: final URL after redirects
 - `requested_url`: original URL
 - `title`, `meta_description`
-- `main_text`: preferred cleaned page content, capped at 50,000 characters
+- `main_text`: cleaned page content, capped at 50,000 characters in full mode and 35,000 in agent mode
 - `links`: up to 100 deduplicated HTTP(S) links with trimmed text and absolute URLs
 - `raw_html`: compatibility field, capped at 100,000 characters; `main_text` is preferred
 - `content_type`, `status_code`
@@ -60,7 +60,7 @@ Typical statuses: 400 invalid URL/input, 401 missing or invalid bearer token, 40
 
 ## Extraction
 
-Trafilatura attempts high-quality main-content extraction. If it cannot identify content or raises an error, BeautifulSoup provides a cleaned fallback with scripts, styles, navigation, headers, footers, forms, templates, and hidden elements removed. Raw HTML remains available for compatibility within its limit.
+Full mode uses Trafilatura for high-quality article/main-content extraction, with a cleaned BeautifulSoup fallback. `mode=agent` uses a separate fast, deterministic reduction path that preserves broad page evidence for downstream AI interpretation. Agent mode does not run an LLM, browser, or JavaScript; it emits compact visible text, semantic hints, and bounded structured data instead of links or raw HTML.
 
 ## Local development
 

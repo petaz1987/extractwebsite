@@ -2,16 +2,18 @@
 
 import hmac
 import ipaddress
+import json
 import logging
 import re
 import socket
+import time
 import unicodedata
 from email.message import Message
 from urllib.parse import urljoin, urlsplit
 
 import requests
 import trafilatura
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Comment, NavigableString, Tag
 from flask import Flask, jsonify, request
 
 LOG = logging.getLogger(__name__)
@@ -21,6 +23,13 @@ MAX_REDIRECTS = 5
 MAX_TEXT_LENGTH = 50_000
 MAX_RAW_HTML_LENGTH = 100_000
 MAX_LINKS = 100
+MAX_AGENT_CONTENT_LENGTH = 35_000
+MAX_AGENT_LINE_LENGTH = 1_200
+MAX_AGENT_HINT_LENGTH = 140
+MAX_AGENT_JSONLD_INPUT_CHARS = 20_000
+MAX_AGENT_JSONLD_INPUT_TOTAL = 50_000
+MAX_AGENT_JSONLD_OUTPUT_CHARS = 10_000
+AGENT_TRUNCATION_MARKER = "[content truncated]"
 TIMEOUT = (5, 10)
 USER_AGENT = "ExtractWebsite/1.0 (+https://github.com/petaz1987/extractwebsite)"
 ALLOWED_CONTENT_TYPES = {"text/html", "application/xhtml+xml"}
@@ -263,6 +272,162 @@ def _extract_links(soup, final_url):
     return links
 
 
+def _bounded_agent_value(value, limit=48):
+    if isinstance(value, (list, tuple)):
+        value = " ".join(str(part) for part in value)
+    elif not isinstance(value, str):
+        value = str(value)
+    value = " ".join(value.split())
+    if len(value) > limit:
+        return value[: limit - 1] + "…"
+    return value
+
+
+def _agent_selector(tag):
+    selector = tag.name or "tag"
+    element_id = tag.get("id")
+    if element_id:
+        selector += "#" + _bounded_agent_value(element_id, 32)
+    classes = tag.get("class", [])
+    if isinstance(classes, str):
+        classes = classes.split()
+    for class_name in classes[:3]:
+        if class_name:
+            selector += "." + _bounded_agent_value(class_name, 24)
+    return selector
+
+
+def _agent_tag_hint(tag):
+    selector = _agent_selector(tag)
+    details = []
+    for attribute in ("itemprop", "role", "aria-label"):
+        value = tag.get(attribute)
+        if value:
+            details.append(f"{attribute}={_bounded_agent_value(value, 36)}")
+    hint = " ".join([selector, *details])[:MAX_AGENT_HINT_LENGTH]
+    return f"[{hint}]"
+
+
+def _agent_semantic_attribute_line(tag):
+    labels = []
+    for attribute in ("itemprop", "property", "name"):
+        value = tag.get(attribute)
+        if value:
+            labels.append(f"{attribute}={_bounded_agent_value(value, 48)}")
+    if not labels:
+        return None
+
+    value = tag.get("content")
+    if value is None or not str(value).strip():
+        value = tag.get("value")
+    if value is None or not str(value).strip():
+        return None
+    rendered_value = _bounded_agent_value(value, 700)
+    return f"[{_agent_selector(tag)} {' '.join(labels)}] {rendered_value}"
+
+
+def _reduce_agent_page(soup):
+    ignored_tags = {"footer", "nav", "noscript", "style", "svg", "template"}
+    lines = []
+    output_length = 0
+    truncated = False
+    stopped = False
+    structured_input_length = 0
+    structured_output_length = 0
+    output_budget = MAX_AGENT_CONTENT_LENGTH - len(AGENT_TRUNCATION_MARKER) - 1
+
+    def append_line(line, line_limit=MAX_AGENT_LINE_LENGTH, deduplicate=True):
+        nonlocal output_length, truncated, stopped
+        if len(line) > line_limit:
+            line = line[: line_limit - 1].rstrip() + "…"
+            truncated = True
+        if deduplicate and lines and line == lines[-1]:
+            return True
+        added_length = len(line) + (1 if lines else 0)
+        if output_length + added_length > output_budget:
+            truncated = True
+            stopped = True
+            return False
+        lines.append(line)
+        output_length += added_length
+        return True
+
+    # Iterator stack keeps memory proportional to DOM depth rather than node count.
+    stack = [iter(soup.children)]
+    while stack and not stopped:
+        try:
+            node = next(stack[-1])
+        except StopIteration:
+            stack.pop()
+            continue
+
+        if isinstance(node, Tag):
+            if node.name in ignored_tags or node.has_attr("hidden"):
+                continue
+            if str(node.get("aria-hidden", "")).strip().lower() == "true":
+                continue
+            roles = node.get("role", [])
+            if isinstance(roles, str):
+                roles = roles.split()
+            if any(role.lower() in {"navigation", "contentinfo"} for role in roles):
+                continue
+
+            if node.name == "script":
+                script_type = str(node.get("type", "")).split(";", 1)[0].strip().lower()
+                if script_type == "application/ld+json":
+                    raw_json = str(node.string or "").strip()
+                    if raw_json:
+                        if (
+                            len(raw_json) > MAX_AGENT_JSONLD_INPUT_CHARS
+                            or structured_input_length + len(raw_json) > MAX_AGENT_JSONLD_INPUT_TOTAL
+                        ):
+                            truncated = True
+                        else:
+                            structured_input_length += len(raw_json)
+                            try:
+                                parsed_json = json.loads(raw_json)
+                                compact_json = json.dumps(parsed_json, ensure_ascii=False, separators=(",", ":"))
+                            except (ValueError, RecursionError):
+                                compact_json = None
+                            if compact_json is not None:
+                                if structured_output_length + len(compact_json) > MAX_AGENT_JSONLD_OUTPUT_CHARS:
+                                    truncated = True
+                                else:
+                                    first_prefix = "[script type=application/ld+json] "
+                                    continuation_prefix = "[script type=application/ld+json continued] "
+                                    remaining_json = compact_json
+                                    first_line = True
+                                    while remaining_json and not stopped:
+                                        prefix = first_prefix if first_line else continuation_prefix
+                                        chunk_size = MAX_AGENT_LINE_LENGTH - len(prefix)
+                                        line = prefix + remaining_json[:chunk_size]
+                                        if not append_line(line, deduplicate=False):
+                                            break
+                                        remaining_json = remaining_json[chunk_size:]
+                                        first_line = False
+                                    if not remaining_json:
+                                        structured_output_length += len(compact_json)
+                continue
+
+            semantic_line = _agent_semantic_attribute_line(node)
+            if semantic_line is not None:
+                append_line(semantic_line)
+                if stopped:
+                    break
+            stack.append(iter(node.children))
+            continue
+
+        if isinstance(node, NavigableString) and not isinstance(node, Comment):
+            text = " ".join(str(node).split())
+            if text and isinstance(node.parent, Tag):
+                append_line(f"{_agent_tag_hint(node.parent)} {text}")
+
+    if truncated:
+        content = "\n".join(lines)
+        return f"{content}\n{AGENT_TRUNCATION_MARKER}" if content else AGENT_TRUNCATION_MARKER
+    return "\n".join(lines)
+
+
 def extract_web_content(url):
     final_url, content_type, status_code, html = _fetch_page(url)
     soup = BeautifulSoup(html, "html.parser")
@@ -292,23 +457,43 @@ def extract_web_content(url):
     }
 
 
-def project_response(result, mode):
-    """Return either the backwards-compatible full response or its agent projection."""
-    if mode != "agent":
-        return result
-    fields = (
-        "url",
-        "requested_url",
-        "title",
-        "meta_description",
-        "main_text",
-        "content_type",
-        "status_code",
-        "content_status",
-        "usable",
-        "block_reason",
+def extract_agent_content(url):
+    total_start = time.perf_counter()
+    final_url, content_type, status_code, html = _fetch_page(url)
+    fetch_decode_end = time.perf_counter()
+
+    soup = BeautifulSoup(html, "html.parser")
+    title = soup.title.get_text(" ", strip=True) if soup.title else ""
+    meta = soup.find("meta", attrs={"name": lambda value: value and value.lower() == "description"})
+    meta_description = meta.get("content", "").strip() if meta else ""
+    main_text = _reduce_agent_page(soup)
+    reduce_end = time.perf_counter()
+
+    content_assessment = _content_assessment(title, main_text)
+    assessment_end = time.perf_counter()
+    result = {
+        "url": final_url,
+        "requested_url": url,
+        "title": title[:1000],
+        "meta_description": meta_description[:5000],
+        "main_text": main_text,
+        "content_type": content_type,
+        "status_code": status_code,
+        **content_assessment,
+    }
+    total_end = time.perf_counter()
+
+    LOG.info(
+        "Agent extraction timing: fetch_decode_ms=%.1f parse_reduce_ms=%.1f assessment_ms=%.1f "
+        "total_ms=%.1f html_chars=%d reduced_chars=%d",
+        (fetch_decode_end - total_start) * 1000,
+        (reduce_end - fetch_decode_end) * 1000,
+        (assessment_end - reduce_end) * 1000,
+        (total_end - total_start) * 1000,
+        len(html),
+        len(main_text),
     )
-    return {field: result[field] for field in fields}
+    return result
 
 
 def create_app(token=None):
@@ -341,14 +526,17 @@ def create_app(token=None):
         if len(urls) != 1 or not urls[0].strip():
             return _safe_error("invalid_url", "Provide exactly one non-empty url query parameter.", 400)
         try:
-            result = extract_web_content(urls[0])
+            if mode == "agent":
+                result = extract_agent_content(urls[0])
+            else:
+                result = extract_web_content(urls[0])
         except ExtractionError as exc:
             return _safe_error(exc.code, exc.message, exc.status)
         except Exception as exc:
             # Avoid formatting arbitrary upstream exception strings, which may contain URLs.
             LOG.error("Unexpected extraction failure (%s)", type(exc).__name__)
             return _safe_error("upstream_fetch_failed", "The upstream page could not be fetched.", 502)
-        return jsonify(project_response(result, mode))
+        return jsonify(result)
 
     return app
 
@@ -359,4 +547,10 @@ app = create_app()
 if __name__ == "__main__":
     import os
 
+    if not LOG.handlers:
+        timing_handler = logging.StreamHandler()
+        timing_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        LOG.addHandler(timing_handler)
+    LOG.setLevel(logging.INFO)
+    LOG.propagate = False
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "5000")))
