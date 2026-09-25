@@ -191,6 +191,64 @@ def test_content_extraction_fallback_and_links(monkeypatch):
     assert result["requested_url"] == "https://example.com/start"
     assert result["url"] == "https://example.com/final"
     assert result["links"] == [{"text": "Story", "href": "https://example.com/story"}]
+    assert result["content_status"] == "ok"
+    assert result["usable"] is True
+    assert result["block_reason"] is None
+
+
+def test_amazon_spanish_challenge_is_blocked_without_changing_http_status(monkeypatch):
+    html = "<html><head><title>Continuar</title></head><body>Haz clic en el botón de abajo para seguir comprando</body></html>"
+    monkeypatch.setattr(main, "_fetch_page", lambda url: (url, "text/html", 200, html))
+    monkeypatch.setattr(main.trafilatura, "extract", lambda *args, **kwargs: None)
+
+    result = main.extract_web_content("https://www.amazon.es/example")
+
+    assert result["status_code"] == 200
+    assert result["content_status"] == "blocked"
+    assert result["usable"] is False
+    assert result["block_reason"] == "anti_bot_challenge"
+
+
+@pytest.mark.parametrize("challenge", [
+    "Click the button below to continue shopping.",
+    "Sorry, we just need to make sure you're not a robot.",
+    "Please verify you are human.",
+    "Checking your browser before accessing this site.",
+    "Enable JavaScript and cookies to continue.",
+])
+def test_english_high_confidence_challenges_are_blocked(challenge):
+    result = main._content_assessment("", challenge)
+    assert result == {
+        "content_status": "blocked",
+        "usable": False,
+        "block_reason": "anti_bot_challenge",
+    }
+
+
+@pytest.mark.parametrize("main_text", [None, "", "  \n\t  "])
+def test_missing_or_whitespace_only_content_is_empty(main_text):
+    result = main._content_assessment("A title", main_text)
+    assert result == {"content_status": "empty", "usable": False, "block_reason": None}
+
+
+def test_generic_security_terms_in_normal_article_do_not_cause_block():
+    article = (
+        "The CAPTCHA on our test environment failed during the morning run. "
+        "The log reported access denied for one user, and the security verification "
+        "was later confirmed as a configuration issue. The article also discusses "
+        "robot checks and anti-bot protection as common web security techniques."
+    )
+    result = main._content_assessment("Troubleshooting access denied errors", article)
+    assert result == {"content_status": "ok", "usable": True, "block_reason": None}
+
+
+def test_challenge_phrase_after_first_3000_main_text_characters_does_not_block():
+    article = ("Ordinary article content. " * 150) + "verify you are human"
+    assert "verify you are human" not in article[:3000]
+
+    result = main._content_assessment("A normal article", article)
+
+    assert result == {"content_status": "ok", "usable": True, "block_reason": None}
 
 
 def test_trafilatura_content_and_link_limit(monkeypatch):
@@ -219,6 +277,9 @@ def test_response_modes_preserve_full_payload_and_project_agent_fields(client, m
         "raw_html": "<html>page</html>",
         "content_type": "text/html",
         "status_code": 200,
+        "content_status": "ok",
+        "usable": True,
+        "block_reason": None,
     }
     monkeypatch.setattr(main, "extract_web_content", lambda url: full_result)
     headers = {"Authorization": "Bearer test-secret"}
@@ -238,6 +299,9 @@ def test_response_modes_preserve_full_payload_and_project_agent_fields(client, m
         "main_text": "Article text",
         "content_type": "text/html",
         "status_code": 200,
+        "content_status": "ok",
+        "usable": True,
+        "block_reason": None,
     }
     assert "raw_html" not in agent_response.get_json()
     assert "links" not in agent_response.get_json()

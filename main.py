@@ -3,7 +3,9 @@
 import hmac
 import ipaddress
 import logging
+import re
 import socket
+import unicodedata
 from urllib.parse import urljoin, urlsplit
 
 import requests
@@ -21,6 +23,14 @@ MAX_LINKS = 100
 TIMEOUT = (5, 10)
 USER_AGENT = "ExtractWebsite/1.0 (+https://github.com/petaz1987/extractwebsite)"
 ALLOWED_CONTENT_TYPES = {"text/html", "application/xhtml+xml"}
+SOFT_BLOCK_MARKERS = (
+    "haz clic en el boton de abajo para seguir comprando",
+    "click the button below to continue shopping",
+    "sorry we just need to make sure you re not a robot",
+    "verify you are human",
+    "checking your browser before accessing",
+    "enable javascript and cookies to continue",
+)
 
 
 class ExtractionError(Exception):
@@ -179,6 +189,28 @@ def _clean_text(value):
     return "\n".join(line.strip() for line in value.splitlines() if line.strip())
 
 
+def _normalize_for_matching(value):
+    decomposed = unicodedata.normalize("NFKD", value.casefold())
+    without_marks = "".join(char for char in decomposed if not unicodedata.combining(char))
+    return re.sub(r"[^a-z0-9]+", " ", without_marks).strip()
+
+
+def _content_assessment(title, main_text):
+    if not isinstance(main_text, str):
+        return {"content_status": "empty", "usable": False, "block_reason": None}
+    normalized_main_text = " ".join(main_text.split())
+    if not normalized_main_text:
+        return {"content_status": "empty", "usable": False, "block_reason": None}
+
+    normalized_title = " ".join(title.split()) if isinstance(title, str) else ""
+    marker_text = _normalize_for_matching(
+        " ".join((normalized_title, normalized_main_text[:3000]))
+    )
+    if any(marker in marker_text for marker in SOFT_BLOCK_MARKERS):
+        return {"content_status": "blocked", "usable": False, "block_reason": "anti_bot_challenge"}
+    return {"content_status": "ok", "usable": True, "block_reason": None}
+
+
 def _fallback_text(soup):
     for node in soup.find_all(["script", "style", "noscript", "nav", "footer", "header", "form", "template"]):
         node.decompose()
@@ -224,6 +256,7 @@ def extract_web_content(url):
         LOG.info("Main-content extraction failed (%s)", type(exc).__name__)
         main_text = ""
     main_text = _clean_text(main_text) or _fallback_text(soup)
+    content_assessment = _content_assessment(title, main_text)
 
     return {
         "url": final_url,
@@ -235,6 +268,7 @@ def extract_web_content(url):
         "raw_html": html[:MAX_RAW_HTML_LENGTH],
         "content_type": content_type,
         "status_code": status_code,
+        **content_assessment,
     }
 
 
@@ -250,6 +284,9 @@ def project_response(result, mode):
         "main_text",
         "content_type",
         "status_code",
+        "content_status",
+        "usable",
+        "block_reason",
     )
     return {field: result[field] for field in fields}
 

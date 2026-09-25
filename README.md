@@ -23,8 +23,11 @@ Requires `Authorization: Bearer <EXTRACT_API_TOKEN>`. The service returns a JSON
 - `links`: up to 100 deduplicated HTTP(S) links with trimmed text and absolute URLs
 - `raw_html`: compatibility field, capped at 100,000 characters; `main_text` is preferred
 - `content_type`, `status_code`
+- `content_status`, `usable`, `block_reason`: content assessment independent of HTTP transport status
 
-Add the optional `mode=agent` query parameter for LLM/agent consumers. This compact response includes only `url`, `requested_url`, `title`, `meta_description`, `main_text`, `content_type`, and `status_code`, avoiding raw HTML and the link inventory in model context. Omitting `mode` preserves the full response; unsupported or duplicate mode parameters return HTTP 400.
+HTTP 2xx means the upstream request succeeded. The assessment reports `content_status: "ok"`, `usable: true`, and `block_reason: null` for usable content. A detected challenge or soft block reports `content_status: "blocked"`, `usable: false`, and `block_reason: "anti_bot_challenge"`. Missing or whitespace-only extracted text reports `content_status: "empty"`, `usable: false`, and `block_reason: null`. Thus, HTTP 200 can accompany blocked or empty content. Consumers should not treat content with `usable: false` as verified page evidence.
+
+Add the optional `mode=agent` query parameter for LLM/agent consumers. This compact response includes only `url`, `requested_url`, `title`, `meta_description`, `main_text`, `content_type`, `status_code`, and the three content-assessment fields, avoiding raw HTML and the link inventory in model context. Omitting `mode` preserves the full response; unsupported or duplicate mode parameters return HTTP 400.
 
 Example:
 
