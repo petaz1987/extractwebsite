@@ -6,6 +6,7 @@ import logging
 import re
 import socket
 import unicodedata
+from email.message import Message
 from urllib.parse import urljoin, urlsplit
 
 import requests
@@ -126,6 +127,26 @@ def _read_bounded_body(response):
     return b"".join(chunks)
 
 
+def _decode_html_body(body, content_type_header, fallback_encoding):
+    content_type = Message()
+    content_type["content-type"] = content_type_header
+    declared_encoding = content_type.get_content_charset()
+    if declared_encoding:
+        try:
+            return body.decode(declared_encoding, errors="replace")
+        except LookupError:
+            pass
+
+    try:
+        return body.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        encoding = fallback_encoding or "windows-1252"
+        try:
+            return body.decode(encoding, errors="replace")
+        except LookupError:
+            return body.decode("windows-1252", errors="replace")
+
+
 def _fetch_page(requested_url):
     current_url = requested_url
     visited = set()
@@ -176,8 +197,7 @@ def _fetch_page(requested_url):
                 raise ExtractionError("unsupported_content_type", "The upstream response is not an HTML page.", 415)
             try:
                 body = _read_bounded_body(response)
-                encoding = response.encoding or "utf-8"
-                html = body.decode(encoding, errors="replace")
+                html = _decode_html_body(body, response.headers.get("Content-Type", ""), response.encoding)
             finally:
                 response.close()
             return current_url, content_type, response.status_code, html

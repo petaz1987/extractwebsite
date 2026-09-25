@@ -175,6 +175,55 @@ def test_streaming_body_limit(monkeypatch):
     assert exc.value.status == 413
 
 
+def test_no_charset_utf8_body_decodes_correctly_and_detects_challenge(monkeypatch):
+    url = "https://www.amazon.es/example"
+    html = "<html><body>Haz clic en el botón de abajo para seguir comprando</body></html>"
+    response = FakeResponse(headers={"Content-Type": "text/html"}, chunks=[html.encode("utf-8")])
+    # Requests may default an undeclared HTML charset to ISO-8859-1.
+    response.encoding = "ISO-8859-1"
+    install_session(monkeypatch, {url: response})
+    monkeypatch.setattr(main.trafilatura, "extract", lambda *args, **kwargs: None)
+
+    result = main.extract_web_content(url)
+
+    assert "botón" in result["main_text"]
+    assert "botÃ³n" not in result["main_text"]
+    assert result["status_code"] == 200
+    assert result["content_status"] == "blocked"
+    assert result["usable"] is False
+    assert result["block_reason"] == "anti_bot_challenge"
+
+
+def test_explicit_non_utf8_charset_is_respected(monkeypatch):
+    url = "https://example.com/legacy"
+    html = "<html><body>café</body></html>"
+    response = FakeResponse(
+        headers={"Content-Type": "text/html; charset=iso-8859-1"},
+        chunks=[html.encode("iso-8859-1")],
+    )
+    response.encoding = "utf-8"
+    install_session(monkeypatch, {url: response})
+
+    _, _, status_code, decoded_html = main._fetch_page(url)
+
+    assert status_code == 200
+    assert "café" in decoded_html
+
+
+def test_invalid_utf8_without_charset_uses_response_encoding_fallback(monkeypatch):
+    url = "https://example.com/legacy"
+    html = "<html><body>café</body></html>"
+    response = FakeResponse(headers={"Content-Type": "text/html"}, chunks=[html.encode("iso-8859-1")])
+    response.encoding = "ISO-8859-1"
+    install_session(monkeypatch, {url: response})
+    monkeypatch.setattr(main.trafilatura, "extract", lambda *args, **kwargs: None)
+
+    result = main.extract_web_content(url)
+
+    assert "café" in result["main_text"]
+    assert result["status_code"] == 200
+
+
 def test_content_extraction_fallback_and_links(monkeypatch):
     html = """<html><head><title> Page title </title><meta name="description" content="A description"></head>
       <body><nav>Menu noise</nav><main><h1>Article</h1><p>Useful page text.</p></main><footer>Footer noise</footer>
