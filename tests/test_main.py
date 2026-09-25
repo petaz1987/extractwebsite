@@ -1,3 +1,4 @@
+import json
 import os
 
 os.environ.setdefault("EXTRACT_API_TOKEN", "test-secret")
@@ -175,6 +176,135 @@ def test_streaming_body_limit(monkeypatch):
     assert exc.value.status == 413
 
 
+def test_agent_path_skips_trafilatura_and_link_inventory(monkeypatch):
+    html = "<html><head><title>Sample</title></head><body><main><p>Useful content.</p></main></body></html>"
+    monkeypatch.setattr(main, "_fetch_page", lambda url: (url, "text/html", 200, html))
+    monkeypatch.setattr(main.trafilatura, "extract", lambda *args, **kwargs: pytest.fail("Trafilatura ran in agent mode"))
+    monkeypatch.setattr(main, "_extract_links", lambda *args, **kwargs: pytest.fail("link inventory built in agent mode"))
+
+    result = main.extract_agent_content("https://example.com/page")
+
+    assert result["main_text"]
+    assert "raw_html" not in result
+    assert "links" not in result
+    assert set(result) == {
+        "url", "requested_url", "title", "meta_description", "main_text", "content_type", "status_code",
+        "content_status", "usable", "block_reason",
+    }
+
+
+def test_agent_reducer_preserves_product_context_forms_tables_and_semantic_values():
+    html = """<html><body><main>
+      <h1 id="product-title">Generic Tablet</h1>
+      <span class="price"><span class="amount">199,99 €</span></span>
+      <form><label for="qty">Quantity</label><input id="qty" name="quantity" value="2"><button>Add to cart</button></form>
+      <table><tr><th>Memory</th><td>8 GB</td></tr></table>
+      <meta property="og:price:amount" content="199.99">
+      <div itemprop="price" content="199.99"></div>
+    </main></body></html>"""
+    result = main._reduce_agent_page(main.BeautifulSoup(html, "html.parser"))
+
+    assert "[h1#product-title] Generic Tablet" in result
+    assert "[span.amount] 199,99 €" in result
+    assert "[label] Quantity" in result
+    assert "[input#qty name=quantity] 2" in result
+    assert "[button] Add to cart" in result
+    assert "[th] Memory" in result and "[td] 8 GB" in result
+    assert "[meta property=og:price:amount] 199.99" in result
+    assert "[div itemprop=price] 199.99" in result
+
+
+def test_agent_reducer_keeps_jsonld_compact_and_ignores_malformed_jsonld():
+    html = """<html><head>
+      <script type="application/ld+json">{ "@type": "Product", "name": "Widget" }</script>
+      <script type="application/ld+json">{ malformed }</script>
+    </head><body><p>Visible text</p></body></html>"""
+    result = main._reduce_agent_page(main.BeautifulSoup(html, "html.parser"))
+
+    assert '[script type=application/ld+json] {"@type":"Product","name":"Widget"}' in result
+    assert "Visible text" in result
+    assert "malformed" not in result
+
+
+def test_jsonld_is_preserved_across_bounded_continuation_lines():
+    json_data = {"name": "x" * 4000}
+    compact_json = json.dumps(json_data, ensure_ascii=False, separators=(",", ":"))
+    html = f'<script type="application/ld+json">{json.dumps(json_data)}</script>'
+
+    result = main._reduce_agent_page(main.BeautifulSoup(html, "html.parser"))
+    lines = result.splitlines()
+    first_prefix = "[script type=application/ld+json] "
+    continuation_prefix = "[script type=application/ld+json continued] "
+    json_parts = []
+    for line in lines:
+        assert len(line) <= main.MAX_AGENT_LINE_LENGTH
+        if line.startswith(first_prefix):
+            json_parts.append(line[len(first_prefix):])
+        elif line.startswith(continuation_prefix):
+            json_parts.append(line[len(continuation_prefix):])
+
+    assert len(json_parts) > 1
+    assert "".join(json_parts) == compact_json
+
+
+def test_agent_reducer_removes_noise_and_hidden_content():
+    html = """<html><body>
+      <script>application state noise</script><style>.x { color: red }</style><noscript>noscript noise</noscript>
+      <svg><text>svg noise</text></svg><template>template noise</template><nav>navigation noise</nav>
+      <footer>footer noise</footer><div hidden>hidden noise</div><div aria-hidden="true">aria hidden noise</div>
+      <main><p>Visible semantic content</p></main>
+    </body></html>"""
+    result = main._reduce_agent_page(main.BeautifulSoup(html, "html.parser"))
+
+    assert "Visible semantic content" in result
+    for noise in ("application state", "color: red", "noscript noise", "svg noise", "template noise",
+                  "navigation noise", "footer noise", "hidden noise", "aria hidden noise"):
+        assert noise not in result
+
+
+def test_agent_reducer_output_is_bounded_and_truncation_is_deterministic():
+    paragraphs = "".join(f"<p>content-{index} {'x' * 800}</p>" for index in range(60))
+    html = f"<html><body><main>{paragraphs}</main></body></html>"
+    first = main._reduce_agent_page(main.BeautifulSoup(html, "html.parser"))
+    second = main._reduce_agent_page(main.BeautifulSoup(html, "html.parser"))
+
+    assert first == second
+    assert len(first) <= main.MAX_AGENT_CONTENT_LENGTH
+    assert main.AGENT_TRUNCATION_MARKER in first
+    assert all(len(line) <= main.MAX_AGENT_LINE_LENGTH for line in first.splitlines())
+
+    large_jsonld = "{" + '"value":"' + ("x" * (main.MAX_AGENT_JSONLD_INPUT_CHARS + 1)) + '"}'
+    large_jsonld_page = f'<script type="application/ld+json">{large_jsonld}</script><p>Useful text</p>'
+    reduced = main._reduce_agent_page(main.BeautifulSoup(large_jsonld_page, "html.parser"))
+    assert len(reduced) <= main.MAX_AGENT_CONTENT_LENGTH
+    assert main.AGENT_TRUNCATION_MARKER in reduced
+    assert "Useful text" in reduced
+
+
+def test_agent_challenge_and_empty_reduced_content_assessment(monkeypatch):
+    challenge_html = "<html><body><p>Haz clic en el botón de abajo para seguir comprando</p></body></html>"
+    monkeypatch.setattr(main, "_fetch_page", lambda url: (url, "text/html", 200, challenge_html))
+    result = main.extract_agent_content("https://example.com/challenge")
+    assert result["status_code"] == 200
+    assert result["content_status"] == "blocked"
+    assert result["usable"] is False
+    assert result["block_reason"] == "anti_bot_challenge"
+
+    empty_html = "<html><body><nav>menu</nav><footer>footer</footer></body></html>"
+    monkeypatch.setattr(main, "_fetch_page", lambda url: (url, "text/html", 200, empty_html))
+    empty = main.extract_agent_content("https://example.com/empty")
+    assert empty["content_status"] == "empty"
+    assert empty["usable"] is False
+    assert empty["block_reason"] is None
+
+    normal_html = "<html><body><article>CAPTCHA and access denied are discussed as security terms.</article></body></html>"
+    monkeypatch.setattr(main, "_fetch_page", lambda url: (url, "text/html", 200, normal_html))
+    normal = main.extract_agent_content("https://example.com/article")
+    assert normal["content_status"] == "ok"
+    assert normal["usable"] is True
+    assert normal["block_reason"] is None
+
+
 def test_no_charset_utf8_body_decodes_correctly_and_detects_challenge(monkeypatch):
     url = "https://www.amazon.es/example"
     html = "<html><body>Haz clic en el botón de abajo para seguir comprando</body></html>"
@@ -307,6 +437,7 @@ def test_trafilatura_content_and_link_limit(monkeypatch):
     result = main.extract_web_content("https://example.com/")
     assert result["main_text"] == "High quality article text"
     assert len(result["links"]) == main.MAX_LINKS
+    assert "raw_html" in result and "content_status" in result
 
 
 def test_exactly_one_url_parameter_required(client):
@@ -331,6 +462,8 @@ def test_response_modes_preserve_full_payload_and_project_agent_fields(client, m
         "block_reason": None,
     }
     monkeypatch.setattr(main, "extract_web_content", lambda url: full_result)
+    agent_result = {key: value for key, value in full_result.items() if key not in {"links", "raw_html"}}
+    monkeypatch.setattr(main, "extract_agent_content", lambda url: agent_result)
     headers = {"Authorization": "Bearer test-secret"}
 
     full_response = client.get("/extract?url=https://example.com", headers=headers)
