@@ -24,6 +24,7 @@ def test_authentication_and_health(client, monkeypatch):
     assert client.get("/health").status_code == 200
     assert client.get("/extract?url=https://example.com").status_code == 401
     assert client.get("/extract?url=https://example.com&mode=agent").status_code == 401
+    assert client.get("/extract?url=https://example.com&mode=agent&include_links=1").status_code == 401
     assert client.get("/extract?url=https://example.com", headers={"Authorization": "Bearer wrong"}).status_code == 401
     assert client.get("/extract?url=https://example.com&mode=agent", headers={"Authorization": "Bearer wrong"}).status_code == 401
     response = client.get("/extract?url=https://example.com", headers={"Authorization": "Bearer test-secret"})
@@ -190,6 +191,81 @@ def test_agent_path_skips_trafilatura_and_link_inventory(monkeypatch):
     assert set(result) == {
         "url", "requested_url", "title", "meta_description", "main_text", "content_type", "status_code",
         "content_status", "usable", "block_reason",
+    }
+
+
+def test_agent_mode_optionally_includes_links_from_one_fetch(client, monkeypatch):
+    requested_url = "https://example.com/events/start"
+    final_url = "https://example.com/events/2026/"
+    html = """<html><head><title>Events</title></head><body>
+      <main><h1>Cultural Events</h1><p>November programme and event details.</p></main>
+      <a href="../../files/programme.xlsx">Download <b>November programme</b></a>
+      <a href="https://example.com/files/programme.xlsx">Duplicate link</a>
+      <a href="javascript:alert(1)">JavaScript</a>
+      <a href="mailto:events@example.com">Email</a>
+      <a href="#details">Fragment</a>
+      <a href="http://[invalid">Malformed</a>
+    </body></html>"""
+    fetches = []
+
+    def fake_fetch(url):
+        fetches.append(url)
+        return final_url, "text/html", 200, html
+
+    monkeypatch.setattr(main, "_fetch_page", fake_fetch)
+    response = client.get(
+        f"/extract?url={requested_url}&mode=agent&include_links=1",
+        headers={"Authorization": "Bearer test-secret"},
+    )
+
+    assert response.status_code == 200
+    result = response.get_json()
+    assert set(result) == {
+        "url", "requested_url", "title", "meta_description", "main_text", "content_type", "status_code",
+        "content_status", "usable", "block_reason", "links",
+    }
+    assert result["url"] == final_url
+    assert result["requested_url"] == requested_url
+    assert result["links"] == [{
+        "text": "Download November programme",
+        "href": "https://example.com/files/programme.xlsx",
+    }]
+    assert result["main_text"] == main._reduce_agent_page(main.BeautifulSoup(html, "html.parser"))
+    assert result["content_status"] == "ok"
+    assert result["usable"] is True
+    assert result["block_reason"] is None
+    assert fetches == [requested_url]
+
+
+def test_agent_include_links_returns_empty_array_and_respects_max_links(monkeypatch):
+    empty_html = "<html><body><p>Useful page content.</p></body></html>"
+    monkeypatch.setattr(main, "_fetch_page", lambda url: (url, "text/html", 200, empty_html))
+    empty = main.extract_agent_content("https://example.com/empty", include_links=True)
+    assert empty["links"] == []
+
+    links_html = "<html><body><p>Useful page content.</p>" + "".join(
+        f'<a href="/document/{index}">Document {index}</a>' for index in range(main.MAX_LINKS + 25)
+    ) + "</body></html>"
+    monkeypatch.setattr(main, "_fetch_page", lambda url: (url, "text/html", 200, links_html))
+    result = main.extract_agent_content("https://example.com/", include_links=True)
+    assert len(result["links"]) == main.MAX_LINKS
+
+
+@pytest.mark.parametrize("query", [
+    "mode=agent&include_links=0",
+    "mode=agent&include_links=true",
+    "mode=agent&include_links=1&include_links=1",
+    "mode=agent&include_links=1&include_links=0",
+    "include_links=1",
+])
+def test_invalid_or_duplicate_include_links_parameters_are_rejected(client, query):
+    response = client.get(
+        f"/extract?url=https://example.com&{query}",
+        headers={"Authorization": "Bearer test-secret"},
+    )
+    assert response.status_code == 400
+    assert response.get_json() == {
+        "error": {"code": "invalid_include_links", "message": "Unsupported include_links parameter."}
     }
 
 

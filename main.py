@@ -457,7 +457,7 @@ def extract_web_content(url):
     }
 
 
-def extract_agent_content(url):
+def extract_agent_content(url, include_links=False):
     total_start = time.perf_counter()
     final_url, content_type, status_code, html = _fetch_page(url)
     fetch_decode_end = time.perf_counter()
@@ -481,6 +481,8 @@ def extract_agent_content(url):
         "status_code": status_code,
         **content_assessment,
     }
+    if include_links:
+        result["links"] = _extract_links(soup, final_url)
     total_end = time.perf_counter()
 
     LOG.info(
@@ -522,12 +524,21 @@ def create_app(token=None):
         if mode and mode != "agent":
             return _safe_error("invalid_mode", "Unsupported extraction mode.", 400)
 
+        include_links_values = request.args.getlist("include_links")
+        if include_links_values and (
+            mode != "agent" or len(include_links_values) != 1 or include_links_values[0] != "1"
+        ):
+            return _safe_error("invalid_include_links", "Unsupported include_links parameter.", 400)
+
         urls = request.args.getlist("url")
         if len(urls) != 1 or not urls[0].strip():
             return _safe_error("invalid_url", "Provide exactly one non-empty url query parameter.", 400)
         try:
             if mode == "agent":
-                result = extract_agent_content(urls[0])
+                if include_links_values:
+                    result = extract_agent_content(urls[0], include_links=True)
+                else:
+                    result = extract_agent_content(urls[0])
             else:
                 result = extract_web_content(urls[0])
         except ExtractionError as exc:

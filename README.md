@@ -27,7 +27,7 @@ Requires `Authorization: Bearer <EXTRACT_API_TOKEN>`. The service returns a JSON
 
 HTTP 2xx means the upstream request succeeded. The assessment reports `content_status: "ok"`, `usable: true`, and `block_reason: null` for usable content. A detected challenge or soft block reports `content_status: "blocked"`, `usable: false`, and `block_reason: "anti_bot_challenge"`. Missing or whitespace-only extracted text reports `content_status: "empty"`, `usable: false`, and `block_reason: null`. Thus, HTTP 200 can accompany blocked or empty content. Consumers should not treat content with `usable: false` as verified page evidence.
 
-Add the optional `mode=agent` query parameter for LLM/agent consumers. This compact response includes only `url`, `requested_url`, `title`, `meta_description`, `main_text`, `content_type`, `status_code`, and the three content-assessment fields, avoiding raw HTML and the link inventory in model context. Omitting `mode` preserves the full response; unsupported or duplicate mode parameters return HTTP 400.
+Add the optional `mode=agent` query parameter for LLM/agent consumers. This compact response includes `url`, `requested_url`, `title`, `meta_description`, `main_text`, `content_type`, `status_code`, and the three content-assessment fields, avoiding raw HTML and links by default. To include the existing HTML hyperlink inventory in agent mode, add `include_links=1`; `links` contains objects with trimmed anchor `text` and absolute `href` values. Returned links are extracted from the page but are not independently validated as safe navigation destinations. Validate URLs and source constraints before fetching any returned link. The default/full response is unchanged when `mode` is omitted. Unsupported or duplicate `mode` or `include_links` parameters return HTTP 400.
 
 Example:
 
@@ -35,6 +35,7 @@ Example:
 curl --get 'https://YOUR-RENDER-HOST/extract' \
   --data-urlencode 'url=https://example.com/article' \
   --data-urlencode 'mode=agent' \
+  --data-urlencode 'include_links=1' \
   -H 'Authorization: Bearer YOUR_CONFIGURED_TOKEN'
 ```
 
