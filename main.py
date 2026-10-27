@@ -15,6 +15,7 @@ import requests
 import trafilatura
 from bs4 import BeautifulSoup, Comment, NavigableString, Tag
 from flask import Flask, jsonify, request
+from product_extraction import extract_product_content as _extract_product_html
 from search_extraction import extract_search_content as _extract_search_html
 
 LOG = logging.getLogger(__name__)
@@ -528,6 +529,27 @@ def extract_search_content(url):
     return result
 
 
+def extract_product_content(url):
+    """Fetch once, assess usability, then extract one product from the full HTML."""
+    total_start = time.perf_counter()
+    final_url, _, status_code, html = _fetch_page(url)
+    fetch_end = time.perf_counter()
+    soup = BeautifulSoup(html, "html.parser")
+    title = soup.title.get_text(" ", strip=True) if soup.title else ""
+    assessment = _content_assessment(title, _fallback_text(soup))
+    result = _extract_product_html(final_url, html, content_status=assessment["content_status"])
+    total_end = time.perf_counter()
+    LOG.info(
+        "Product extraction timing: fetch_ms=%.1f parse_ms=%.1f total_ms=%.1f html_chars=%d status_code=%d",
+        (fetch_end - total_start) * 1000,
+        (total_end - fetch_end) * 1000,
+        (total_end - total_start) * 1000,
+        len(html),
+        status_code,
+    )
+    return result
+
+
 def create_app(token=None):
     configured_token = token if token is not None else __import__("os").environ.get("EXTRACT_API_TOKEN")
     if not configured_token:
@@ -551,7 +573,7 @@ def create_app(token=None):
         if len(modes) > 1:
             return _safe_error("invalid_mode", "Unsupported extraction mode.", 400)
         mode = modes[0] if modes else ""
-        if mode and mode not in {"agent", "search"}:
+        if mode and mode not in {"agent", "search", "product"}:
             return _safe_error("invalid_mode", "Unsupported extraction mode.", 400)
 
         include_links_values = request.args.getlist("include_links")
@@ -571,6 +593,8 @@ def create_app(token=None):
                     result = extract_agent_content(urls[0])
             elif mode == "search":
                 result = extract_search_content(urls[0])
+            elif mode == "product":
+                result = extract_product_content(urls[0])
             else:
                 result = extract_web_content(urls[0])
         except ExtractionError as exc:

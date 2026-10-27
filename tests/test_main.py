@@ -26,8 +26,10 @@ def test_authentication_and_health(client, monkeypatch):
     assert client.get("/extract?url=https://example.com&mode=agent").status_code == 401
     assert client.get("/extract?url=https://example.com&mode=agent&include_links=1").status_code == 401
     assert client.get("/extract?url=https://example.com&mode=search").status_code == 401
+    assert client.get("/extract?url=https://example.com&mode=product").status_code == 401
     assert client.get("/extract?url=https://example.com", headers={"Authorization": "Bearer wrong"}).status_code == 401
     assert client.get("/extract?url=https://example.com&mode=agent", headers={"Authorization": "Bearer wrong"}).status_code == 401
+    assert client.get("/extract?url=https://example.com&mode=product", headers={"Authorization": "Bearer wrong"}).status_code == 401
     response = client.get("/extract?url=https://example.com", headers={"Authorization": "Bearer test-secret"})
     assert response.status_code == 200
 
@@ -280,6 +282,43 @@ def test_search_mode_rejects_include_links(client):
     assert response.get_json() == {
         "error": {"code": "invalid_include_links", "message": "Unsupported include_links parameter."}
     }
+
+
+def test_product_mode_uses_one_existing_fetch_and_rejects_include_links(client, monkeypatch):
+    requested_url = "https://shop.example/pd/item-12345678"
+    final_url = "https://shop.example/final/pd/item-12345678"
+    html = """<html><head><title>Item</title><meta property='product:price:amount' content='12'>
+      <meta property='product:price:currency' content='EUR'></head><body><main><h1>Item</h1>
+      <p>Article number 12345678</p></main></body></html>"""
+    calls = []
+
+    def fake_fetch(url):
+        calls.append(url)
+        return final_url, "text/html", 200, html
+
+    monkeypatch.setattr(main, "_fetch_page", fake_fetch)
+    response = client.get(
+        f"/extract?url={requested_url}&mode=product",
+        headers={"Authorization": "Bearer test-secret"},
+    )
+
+    assert response.status_code == 200
+    result = response.get_json()
+    assert result["mode"] == "product"
+    assert result["source_url"] == final_url
+    assert result["extraction_status"] == "ok"
+    assert result["product"]["sku"] == "12345678"
+    assert result["product"]["url"] == final_url
+    assert "raw_html" not in result
+    assert "links" not in result
+    assert calls == [requested_url]
+
+    rejected = client.get(
+        f"/extract?url={requested_url}&mode=product&include_links=1",
+        headers={"Authorization": "Bearer test-secret"},
+    )
+    assert rejected.status_code == 400
+    assert rejected.get_json()["error"]["code"] == "invalid_include_links"
 
 
 def test_search_mode_uses_existing_fetch_once_and_returns_compact_product_records(client, monkeypatch):
@@ -672,6 +711,10 @@ def test_unsupported_or_duplicate_modes_are_rejected(client, monkeypatch):
     duplicate = client.get("/extract?url=https://example.com&mode=agent&mode=agent", headers=headers)
     assert duplicate.status_code == 400
     assert duplicate.get_json() == {"error": {"code": "invalid_mode", "message": "Unsupported extraction mode."}}
+
+    duplicate_product = client.get("/extract?url=https://example.com&mode=product&mode=product", headers=headers)
+    assert duplicate_product.status_code == 400
+    assert duplicate_product.get_json() == {"error": {"code": "invalid_mode", "message": "Unsupported extraction mode."}}
 
 
 def test_startup_requires_token(monkeypatch):
