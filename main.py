@@ -15,6 +15,7 @@ import requests
 import trafilatura
 from bs4 import BeautifulSoup, Comment, NavigableString, Tag
 from flask import Flask, jsonify, request
+from search_extraction import extract_search_content as _extract_search_html
 
 LOG = logging.getLogger(__name__)
 MAX_URL_LENGTH = 2048
@@ -498,6 +499,35 @@ def extract_agent_content(url, include_links=False):
     return result
 
 
+def extract_search_content(url):
+    total_start = time.perf_counter()
+    fetch_start = total_start
+    final_url, _, _, html = _fetch_page(url)
+    fetch_end = time.perf_counter()
+
+    assessment_soup = BeautifulSoup(html, "html.parser")
+    title = assessment_soup.title.get_text(" ", strip=True) if assessment_soup.title else ""
+    page_text = _fallback_text(assessment_soup)
+    assessment = _content_assessment(title, page_text)
+    content_status = assessment["content_status"]
+    if content_status == "empty" and title.strip():
+        title_assessment = _content_assessment(title, "Search content probe")
+        if title_assessment["content_status"] == "blocked":
+            content_status = "blocked"
+    result = _extract_search_html(final_url, html, content_status=content_status)
+
+    total_end = time.perf_counter()
+    LOG.info(
+        "Search extraction timing: fetch_ms=%.1f parse_ms=%.1f total_ms=%.1f html_chars=%d product_count=%d",
+        (fetch_end - fetch_start) * 1000,
+        (total_end - fetch_end) * 1000,
+        (total_end - total_start) * 1000,
+        len(html),
+        result["product_count"],
+    )
+    return result
+
+
 def create_app(token=None):
     configured_token = token if token is not None else __import__("os").environ.get("EXTRACT_API_TOKEN")
     if not configured_token:
@@ -521,7 +551,7 @@ def create_app(token=None):
         if len(modes) > 1:
             return _safe_error("invalid_mode", "Unsupported extraction mode.", 400)
         mode = modes[0] if modes else ""
-        if mode and mode != "agent":
+        if mode and mode not in {"agent", "search"}:
             return _safe_error("invalid_mode", "Unsupported extraction mode.", 400)
 
         include_links_values = request.args.getlist("include_links")
@@ -539,6 +569,8 @@ def create_app(token=None):
                     result = extract_agent_content(urls[0], include_links=True)
                 else:
                     result = extract_agent_content(urls[0])
+            elif mode == "search":
+                result = extract_search_content(urls[0])
             else:
                 result = extract_web_content(urls[0])
         except ExtractionError as exc:

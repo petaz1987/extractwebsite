@@ -25,6 +25,7 @@ def test_authentication_and_health(client, monkeypatch):
     assert client.get("/extract?url=https://example.com").status_code == 401
     assert client.get("/extract?url=https://example.com&mode=agent").status_code == 401
     assert client.get("/extract?url=https://example.com&mode=agent&include_links=1").status_code == 401
+    assert client.get("/extract?url=https://example.com&mode=search").status_code == 401
     assert client.get("/extract?url=https://example.com", headers={"Authorization": "Bearer wrong"}).status_code == 401
     assert client.get("/extract?url=https://example.com&mode=agent", headers={"Authorization": "Bearer wrong"}).status_code == 401
     response = client.get("/extract?url=https://example.com", headers={"Authorization": "Bearer test-secret"})
@@ -267,6 +268,97 @@ def test_invalid_or_duplicate_include_links_parameters_are_rejected(client, quer
     assert response.get_json() == {
         "error": {"code": "invalid_include_links", "message": "Unsupported include_links parameter."}
     }
+
+
+def test_search_mode_rejects_include_links(client):
+    response = client.get(
+        "/extract?url=https://example.com/search&mode=search&include_links=1",
+        headers={"Authorization": "Bearer test-secret"},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json() == {
+        "error": {"code": "invalid_include_links", "message": "Unsupported include_links parameter."}
+    }
+
+
+def test_search_mode_uses_existing_fetch_once_and_returns_compact_product_records(client, monkeypatch):
+    requested_url = "https://shop.example/search?q=items"
+    final_url = "https://shop.example/ten/search?q=items"
+    html = '''<html><head><title>Search</title></head><body><main>
+      <div class="itemBlock" id="art_101_x">
+        <a data-item="101" href="/ten/pd/item-one"><h3>ITEM ONE</h3></a>
+        <div data-id="itemFacts-101">White, 60x30 cm</div>
+        <div class="itemPriceBox" data-id="101"><div class="itemNormalPrice"><span data-price="24,90">24,90 €</span></div></div>
+      </div>
+    </main></body></html>'''
+    calls = []
+
+    def fake_fetch(url):
+        calls.append(url)
+        return final_url, "text/html", 200, html
+
+    monkeypatch.setattr(main, "_fetch_page", fake_fetch)
+    response = client.get(
+        f"/extract?url={requested_url}&mode=search",
+        headers={"Authorization": "Bearer test-secret"},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "mode": "search",
+        "source_url": final_url,
+        "extraction_status": "ok",
+        "product_count": 1,
+        "products": [{
+            "name": "ITEM ONE",
+            "sku": "101",
+            "price": 24.9,
+            "currency": "EUR",
+            "variant": "White, 60x30 cm",
+            "url": "https://shop.example/ten/pd/item-one",
+            "image_url": None,
+        }],
+        "truncated": False,
+    }
+    assert "raw_html" not in response.get_json()
+    assert "links" not in response.get_json()
+    assert calls == [requested_url]
+
+
+def test_search_mode_accepts_complete_embedded_records_without_visible_text(monkeypatch):
+    html = '''<html><head><title>Search results</title></head><body>
+      <script>var item = {"partnumber":"101","name":"ITEM","current_price":24.9,"currency":"EUR","url":"/pd/101","default_image":"/101.jpg"};</script>
+    </body></html>'''
+    monkeypatch.setattr(main, "_fetch_page", lambda url: (url, "text/html", 200, html))
+
+    result = main.extract_search_content("https://shop.example/search")
+
+    assert result["extraction_status"] == "ok"
+    assert result["product_count"] == 1
+    assert result["products"][0]["sku"] == "101"
+
+
+def test_search_mode_keeps_title_only_challenge_unusable_with_embedded_record(monkeypatch):
+    html = '''<html><head><title>Verify you are human</title></head><body>
+      <script>var item = {"partnumber":"101","name":"ITEM","url":"/pd/101"};</script>
+    </body></html>'''
+    monkeypatch.setattr(main, "_fetch_page", lambda url: (url, "text/html", 200, html))
+
+    result = main.extract_search_content("https://shop.example/challenge")
+
+    assert result["extraction_status"] == "unusable"
+    assert result["products"] == []
+
+
+def test_search_mode_distinguishes_empty_content_from_usable_no_product_page(monkeypatch):
+    monkeypatch.setattr(main, "_fetch_page", lambda url: (url, "text/html", 200, "<html><body></body></html>"))
+    empty = main.extract_search_content("https://shop.example/empty")
+    assert empty["extraction_status"] == "unusable"
+
+    monkeypatch.setattr(main, "_fetch_page", lambda url: (url, "text/html", 200, "<html><body>Search shell</body></html>"))
+    shell = main.extract_search_content("https://shop.example/shell")
+    assert shell["extraction_status"] == "no_products"
 
 
 def test_agent_reducer_preserves_product_context_forms_tables_and_semantic_values():
@@ -572,6 +664,10 @@ def test_unsupported_or_duplicate_modes_are_rejected(client, monkeypatch):
     unsupported = client.get("/extract?url=https://example.com&mode=compact", headers=headers)
     assert unsupported.status_code == 400
     assert unsupported.get_json() == {"error": {"code": "invalid_mode", "message": "Unsupported extraction mode."}}
+
+    explicit_full = client.get("/extract?url=https://example.com&mode=full", headers=headers)
+    assert explicit_full.status_code == 400
+    assert explicit_full.get_json() == {"error": {"code": "invalid_mode", "message": "Unsupported extraction mode."}}
 
     duplicate = client.get("/extract?url=https://example.com&mode=agent&mode=agent", headers=headers)
     assert duplicate.status_code == 400
