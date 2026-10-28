@@ -7,6 +7,7 @@ from decimal import Decimal, InvalidOperation
 from urllib.parse import unquote, urljoin, urlsplit
 
 from bs4 import BeautifulSoup, Tag
+from guanxe_adapter import is_guanxe_product, same_guanxe_identity, trusted_reference, enrich_guanxe_product
 
 
 MAX_PRODUCT_NAME_LENGTH = 1000
@@ -638,14 +639,20 @@ def extract_product_content(final_url, html, content_status="ok"):
         if target_sku and _record_sku(record) == target_sku
     ]
     if not matching_jsonld and not target_sku:
-        matching_jsonld = [record for record in jsonld_records if _same_page_url(_record_url(record), final_url)]
+        matching_jsonld = [record for record in jsonld_records if (
+            _same_page_url(_record_url(record), final_url)
+            or (is_guanxe_product(final_url) and same_guanxe_identity(final_url, _record_url(record)))
+        )]
 
     def associated(record):
         record_url = _record_url(record)
         resolved_record_url = _resolved_http_url(final_url, record_url) if record_url else None
         return not record_url or (
             resolved_record_url
-            and _same_page_url(resolved_record_url, final_url, allow_http_scheme_match=True)
+            and (
+                _same_page_url(resolved_record_url, final_url, allow_http_scheme_match=True)
+                or (is_guanxe_product(final_url) and same_guanxe_identity(final_url, resolved_record_url))
+            )
         )
 
     if any(not associated(record) for record in matching_jsonld):
@@ -679,9 +686,10 @@ def extract_product_content(final_url, html, content_status="ok"):
         warning_codes.append("identity_conflict")
 
     has_pdp_path = bool(re.search(r"/(?:pd|product|p)/", urlsplit(final_url).path, re.I))
+    guanxe_ref = trusted_reference(soup) if is_guanxe_product(final_url) else None
     identity_evidence = bool(
         matching_gtags or matching_jsonld or visible_skus
-        or (target_sku and has_pdp_path)
+        or (target_sku and has_pdp_path) or guanxe_ref
     )
     if not name or not identity_evidence:
         return _response(final_url, "no_product", warnings=warning_codes)
@@ -781,4 +789,5 @@ def extract_product_content(final_url, html, content_status="ok"):
         or "identity_conflict" in warning_codes or "currency_conflict" in warning_codes
     ):
         status = "partial"
-    return _response(final_url, status, product, warning_codes)
+    result = _response(final_url, status, product, warning_codes)
+    return enrich_guanxe_product(final_url, soup, result)
