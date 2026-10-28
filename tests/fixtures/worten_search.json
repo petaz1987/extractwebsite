@@ -1,0 +1,39 @@
+{
+  "searchResponse": {
+    "totalHits": 2,
+    "hits": [
+      {"product": {"id": "webitem-8235777"}},
+      {"product": {"id": "webitem-8240636"}}
+    ]
+  },
+  "detailsResponse": {
+    "productsData": {
+      "products": [
+        {
+          "id": "product-rs2500",
+          "meta": {"refs": {"webitem_id": "webitem-8235777", "sku": "8235777"}},
+          "woffer": {"offer_id": "offer-rs2500"},
+          "properties": {"text": {"name": "Radiador Aceite ORBEGOZO RS2500"}}
+        },
+        {
+          "id": "product-washer",
+          "meta": {"refs": {"webitem_id": "webitem-8240636", "sku": "8240636"}},
+          "woffer": {"offer_id": "offer-washer"},
+          "properties": {"text": {"name": "Lavadora BECKEN Boostwash BWM8812N"}}
+        }
+      ]
+    },
+    "productsCanonicalsData": {
+      "web_items": [
+        {"id": "webitem-8235777", "url": "/productos/radiador-aceite-orbegozors2500-8235777"},
+        {"id": "webitem-8240636", "url": "https://canarias.worten.es/productos/lavadora-becken-bwm8812n-8240636"}
+      ]
+    },
+    "offersData": {
+      "offers": [
+        {"offer_id": "offer-rs2500", "source_offer_code": "8235777", "price": {"final": "89.99"}},
+        {"offer_id": "offer-washer", "source_offer_code": "8240636", "price": {"final": "329.99"}}
+      ]
+    }
+  }
+}

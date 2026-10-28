@@ -31,6 +31,13 @@ Add the optional `mode=agent` query parameter for LLM/agent consumers. This comp
 
 Add `mode=product` to extract one product detail record from a product page. It parses the complete fetched HTML using bounded structured-data and semantic HTML evidence; it does not execute JavaScript or fetch linked product or image URLs. The response uses `source_url`, `extraction_status`, one `product` object (or `null`), and compact `warnings`. Product fields include name, string SKU, numeric current/original prices, currency, variant, PDP URL, image URL, description, grouped specifications, and factual visible availability evidence. `extraction_status` is `ok` when main identity and current price/currency are reliably associated, `partial` when an identified product has missing or conflicting core pricing/identity evidence, `no_product` when usable content has no reliable main product, and `unusable` for blocked or empty content. Availability entries preserve page wording and do not verify store inventory. `include_links` is not supported with Product Mode.
 
+Worten Canarias is supported by the same Search and Product modes for these URL forms:
+
+- Search: `https://canarias.worten.es/search?query=<search terms>`
+- Product: `https://canarias.worten.es/productos/<product-slug>-<sku>`
+
+Search accepts the `query` parameter only; pagination, sorting, and filter parameters are rejected. Results retain the existing Search response contract and 20-product output limit. Search prices are source observations, not independent PDP verification; the existing Search contract does not expose stock. Currency and variant remain null when the source does not verify them. Product mode works directly from a PDP URL and returns the existing Product response contract. It verifies the requested SKU, canonical identity, and attributable current price/currency evidence. Conflicting or missing price evidence is `partial`; availability evidence does not establish postcode-specific delivery or store stock. This adapter requires a `curl` executable version 8.4.0 or newer in the service runtime. The adapter uses HTTPS, validates and pins public DNS addresses, does not follow redirects or retry, and retains the 5 MiB response limit and 15-second operation budget.
+
 Example:
 
 ```sh

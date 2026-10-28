@@ -17,6 +17,12 @@ from bs4 import BeautifulSoup, Comment, NavigableString, Tag
 from flask import Flask, jsonify, request
 from product_extraction import extract_product_content as _extract_product_html
 from search_extraction import extract_search_content as _extract_search_html
+from worten_adapter import (
+    WortenAdapterError,
+    extract_worten_product,
+    extract_worten_search,
+    is_worten_host_url,
+)
 
 LOG = logging.getLogger(__name__)
 MAX_URL_LENGTH = 2048
@@ -592,12 +598,20 @@ def create_app(token=None):
                 else:
                     result = extract_agent_content(urls[0])
             elif mode == "search":
-                result = extract_search_content(urls[0])
+                if is_worten_host_url(urls[0]):
+                    result = extract_worten_search(urls[0], _resolve_public_addresses)
+                else:
+                    result = extract_search_content(urls[0])
             elif mode == "product":
-                result = extract_product_content(urls[0])
+                if is_worten_host_url(urls[0]):
+                    result = extract_worten_product(urls[0], _resolve_public_addresses)
+                else:
+                    result = extract_product_content(urls[0])
             else:
                 result = extract_web_content(urls[0])
         except ExtractionError as exc:
+            return _safe_error(exc.code, exc.message, exc.status)
+        except WortenAdapterError as exc:
             return _safe_error(exc.code, exc.message, exc.status)
         except Exception as exc:
             # Avoid formatting arbitrary upstream exception strings, which may contain URLs.
