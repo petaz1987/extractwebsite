@@ -12,6 +12,7 @@ from bs4 import Tag
 MAX_SPECS = 200
 MAX_SPEC_FIELD = 1000
 MAX_DESC = 5000
+MAX_SOURCE_DESC = 20000
 _REF_RE = re.compile(r'^\s*Ref\s*:\s*([A-Za-z0-9][A-Za-z0-9._/-]{0,63})\s*$', re.I)
 _EAN_RE = re.compile(r'^\s*EAN\s*:?\s*(\d{8,14})\s*$', re.I)
 _PRODUCT_PATH = re.compile(r'^/es/[^/]+/(\d{3,10})-[^/]+\.html$', re.I)
@@ -277,6 +278,11 @@ def _collect_specifications(sections):
 
 
 def _clean_description(sections, fallback=None):
+    source_truncated = False
+    if isinstance(fallback, str):
+        normalized_fallback = ' '.join(fallback.split())
+        source_truncated = len(normalized_fallback) > MAX_SOURCE_DESC
+        fallback = normalized_fallback[:MAX_SOURCE_DESC]
     for section in sections:
         if _section_is_unrelated(section):
             continue
@@ -329,7 +335,7 @@ def _clean_description(sections, fallback=None):
                     final.append(item)
                 description = ' '.join(final) or paragraphs[0][:MAX_DESC]
             if description:
-                return description
+                return description, source_truncated or len(description) >= MAX_DESC
     # Some pages expose their only useful description through metadata. Clean
     # sentence-level repeats and known search/promotion boilerplate before keeping it.
     text = _clean(fallback, MAX_DESC * 2)
@@ -347,8 +353,8 @@ def _clean_description(sections, fallback=None):
             kept.append(sentence)
         cleaned = _clean(' '.join(kept), MAX_DESC)
         if cleaned:
-            return cleaned
-    return None
+            return cleaned, source_truncated or len(cleaned) >= MAX_DESC
+    return None, source_truncated
 
 
 def _availability(summary, heading):
@@ -372,7 +378,7 @@ def _availability(summary, heading):
     return evidence
 
 
-def enrich_guanxe_product(url, soup, response):
+def enrich_guanxe_product(url, soup, response, *, trusted_description=None):
     """Add only Guanxe-specific evidence; preserve generic name/brand/prices/image.
 
     `response` is the original product-mode five-key record, already validated by
@@ -409,14 +415,23 @@ def enrich_guanxe_product(url, soup, response):
         product['specifications'] = specs
     if truncated and 'specifications_truncated' not in warnings:
         warnings.append('specifications_truncated')
-    description = _clean_description(sections, product.get('description'))
+    description, description_truncated = _clean_description(
+        sections, trusted_description if trusted_description is not None else product.get('description')
+    )
     if description:
         product['description'] = description
         # Generic 'field_truncated' can have come from unbounded marketing metadata.
         # Retain this warning when an unrelated field is still oversized/ambiguous;
         # remove only when original product name is within its limit.
-        if 'field_truncated' in warnings and len(heading.get_text(' ',strip=True))<=1000:
+        if ('field_truncated' in warnings and len(heading.get_text(' ',strip=True)) <= 1000
+                and not description_truncated):
             warnings.remove('field_truncated')
+    elif product.get('description') and (
+            _MARKETING.search(product['description'])
+            or _SEARCH_BOILERPLATE.search(product['description'])):
+        # Do not retain the generic parser's prefix when cleaning the trusted
+        # source finds no usable text; that prefix may be boilerplate only.
+        product['description'] = None
     product['variant'] = None  # Never infer chosen variants from title or generic size/color.
     availability = _availability(summary, heading)
     product['availability_evidence'] = availability

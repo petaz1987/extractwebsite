@@ -798,4 +798,7 @@ def extract_product_content(final_url, html, content_status="ok"):
     ):
         status = "partial"
     result = _response(final_url, status, product, warning_codes)
-    return enrich_guanxe_product(final_url, soup, result)
+    return enrich_guanxe_product(
+        final_url, soup, result,
+        trusted_description=raw_description if guanxe_page else None,
+    )

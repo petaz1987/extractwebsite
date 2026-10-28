@@ -158,6 +158,28 @@ def test_metadata_description_removes_repeated_seo_sentences():
     assert result['product']['description'] == 'Auriculares JBL con sonido Pure Bass.'
 
 
+def test_untruncated_trusted_description_recovers_text_after_5000_chars():
+    boilerplate = 'Resultados de búsqueda de productos relacionados con JBL. '
+    useful = 'Los auriculares JBL Tune 527BT ofrecen sonido Pure Bass y batería duradera.'
+    html = page(JBL, 'JBL Tune 527BT', 'JBL', 54.99, 'Ref: 30458',
+                '<p>Más información</p>',
+                description=(boilerplate * 105) + useful)
+    result = extract_product_content(JBL, html)
+    assert result['product']['description'] == useful
+    assert 'field_truncated' not in result['warnings']
+
+
+def test_source_description_cap_keeps_truncation_warning_and_drops_seo_only_text():
+    boilerplate = 'Resultados de búsqueda de productos relacionados con JBL. '
+    useful_beyond_cap = 'Los auriculares ofrecen sonido JBL Pure Bass.'
+    html = page(JBL, 'JBL Tune 527BT', 'JBL', 54.99, 'Ref: 30458',
+                '<p>Más información</p>',
+                description=(boilerplate * 500) + useful_beyond_cap)
+    result = extract_product_content(JBL, html)
+    assert result['product']['description'] is None
+    assert 'field_truncated' in result['warnings']
+
+
 def test_single_description_paragraph_deduplicates_repeated_sentences():
     sentence = 'Auriculares JBL con sonido Pure Bass.'
     html = page(JBL, 'JBL Tune 527BT', 'JBL', 54.99, 'Ref: 30458',
@@ -298,6 +320,7 @@ def test_jsonld_for_different_guanxe_product_is_not_associated():
     html = page(
         url, 'JBL Tune 527BT', 'JBL', 54.99, 'Ref: 30458',
         '<p>JBL Tune 527BT wireless headphones.</p>',
+        description='UNRELATED SAMSUNG DESCRIPTION ' + ('unrelated text. ' * 500),
     )
     html = html.replace('"url": "' + url + '"', '"url": "' + other_url + '"')
     html = html.replace('<meta property="product:price:amount" content="54.99">', '')
@@ -311,6 +334,7 @@ def test_jsonld_for_different_guanxe_product_is_not_associated():
     assert product['price'] is None
     assert product['currency'] is None
     assert result['extraction_status'] == 'partial'
+    assert 'UNRELATED SAMSUNG DESCRIPTION' not in (product['description'] or '')
 
 
 def test_related_product_ref_and_article_number_do_not_become_sku():
