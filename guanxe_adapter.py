@@ -115,10 +115,9 @@ def _relevant_sections(soup):
         for node in soup.select(selector)[:8]:
             if _section_is_unrelated(node, node):
                 continue
-            if any(parent is node for selected in sections for parent in selected.parents):
-                # Existing section is nested inside the new parent; retain the smaller one.
-                continue
-            if any(node is selected or node in selected.parents for selected in sections):
+            if any(selected is node or selected in node.parents or node in selected.parents
+                   for selected in sections):
+                # Keep the first explicit trusted product section, not nested duplicates.
                 continue
             sections.append(node)
     return sections[:12]
@@ -179,10 +178,18 @@ def _collect_specifications(sections):
     for section in sections:
         if _section_is_unrelated(section, section):
             continue
+        # A returns-policy block embedded in a description is not a specification.
+        allowed_ids = set()
+        for descendant in section.descendants:
+            if isinstance(descendant, Tag) and descendant.name in {'h2','h3','h4','p'}:
+                if _POLICY.match(descendant.get_text(' ', strip=True)[:180]):
+                    break
+            if isinstance(descendant, Tag):
+                allowed_ids.add(id(descendant))
         title = section.get('id', '')
         default_group = 'Ficha técnica' if ('detail' in title.lower() or 'feature' in title.lower()) else 'Technical specifications'
         for table in section.find_all('table', limit=35):
-            if _section_is_unrelated(table, section):
+            if id(table) not in allowed_ids or _section_is_unrelated(table, section):
                 continue
             previous = table.find_previous(['h2','h3','h4'])
             group = _clean(previous.get_text(' ', strip=True)) if previous and previous in section.descendants else default_group
@@ -192,7 +199,7 @@ def _collect_specifications(sections):
                     continue
                 add(group, cells[0].get_text(' ', strip=True), cells[1].get_text(' ', strip=True))
         for dl in section.find_all('dl', limit=40):
-            if _section_is_unrelated(dl, section):
+            if id(dl) not in allowed_ids or _section_is_unrelated(dl, section):
                 continue
             for dt in dl.find_all('dt', recursive=False):
                 dd = dt.find_next_sibling('dd')
@@ -200,7 +207,7 @@ def _collect_specifications(sections):
                     add(default_group, dt.get_text(' ', strip=True), dd.get_text(' ', strip=True))
         # Product-specific nested/listed technical fields: avoid prose-global regular expressions.
         for list_node in section.find_all(['ul','ol'], limit=60):
-            if _section_is_unrelated(list_node, section):
+            if id(list_node) not in allowed_ids or _section_is_unrelated(list_node, section):
                 continue
             heading = list_node.find_previous(['h2','h3','h4','h5'])
             section_heading = _clean(heading.get_text(' ', strip=True)) if heading and heading in section.descendants else None
@@ -230,7 +237,7 @@ def _collect_specifications(sections):
                     add(group,label,value)
         # PrestaShop feature rows: div with 'name' and 'value' immediate children.
         for row in section.select('.data-sheet tr, .product-features .feature, .product-features > dl')[:MAX_SPECS]:
-            if row.name == 'tr':
+            if id(row) not in allowed_ids or row.name == 'tr':
                 continue
             label_node = row.select_one('.name, dt')
             value_node = row.select_one('.value, dd')
@@ -238,7 +245,7 @@ def _collect_specifications(sections):
                 add('Ficha técnica', label_node.get_text(' ', strip=True), value_node.get_text(' ', strip=True))
         # A product description can explicitly show EAN independently of a SKU/Ref.
         for leaf in section.find_all(['p', 'span'], limit=200):
-            if not leaf.find(True):
+            if id(leaf) in allowed_ids and not leaf.find(True):
                 match = _EAN_RE.fullmatch(leaf.get_text(' ', strip=True))
                 if match:
                     add('Identifiers', 'EAN', match.group(1))
@@ -359,8 +366,8 @@ def enrich_guanxe_product(url, soup, response):
             warnings.remove('field_truncated')
     product['variant'] = None  # Never infer chosen variants from title or generic size/color.
     availability = _availability(summary, heading)
+    product['availability_evidence'] = availability
     if availability:
-        product['availability_evidence'] = availability
         positive = any(_IN.search(x['text']) for x in availability)
         negative = any(_OUT.search(x['text']) for x in availability)
         if positive and negative and 'availability_conflict' not in warnings:
