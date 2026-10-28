@@ -167,3 +167,24 @@ def test_non_guanxe_generic_product_is_unchanged_by_enrichment():
               'extraction_status':'ok', 'product':{'sku':'12345678','variant':'Blue'},'warnings':[]}
     result=enrich_guanxe_product(original['source_url'],BeautifulSoup(html,'html.parser'),original)
     assert result is original and result['product']['sku']=='12345678'
+
+
+def test_recommended_stock_does_not_fill_missing_summary_stock():
+    html=page(JBL,'JBL Tune 527BT','JBL',54.99,'Ref: 30458',
+              '<p>Auriculares JBL Pure Bass con batería duradera.</p>')
+    html=html.replace('<p>Este producto está temporalmente agotado</p>', '')
+    html=html.replace('<span>Advertencia: ¡Últimos artículos en inventario!</span>', '')
+    result=extract_product_content(JBL,html)
+    assert result['product']['availability_evidence']==[]
+
+
+def test_policy_table_not_collected_as_product_specs():
+    html=page(JBL,'JBL Tune 527BT','JBL',54.99,'Ref: 30458',
+              '''<h3>Especificaciones Técnicas:</h3>
+              <table><tr><td>Bluetooth</td><td>5.3</td></tr></table>
+              <p>GUANXE ofrece a sus clientes la posibilidad de ejercer su derecho de devolución.</p>
+              <table><tr><td>Plazo de devolución</td><td>14 días</td></tr></table>''')
+    result=extract_product_content(JBL,html)
+    values={(x['label'],x['value']) for x in result['product']['specifications']}
+    assert ('Bluetooth','5.3') in values
+    assert ('Plazo de devolución','14 días') not in values
