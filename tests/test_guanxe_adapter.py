@@ -119,6 +119,31 @@ def test_conflicting_visible_refs_do_not_leak_related_product():
     assert 'identity_conflict' in result['warnings']
 
 
+def test_merchant_ref_in_trusted_adjacent_sibling_is_accepted():
+    html = page(JBL, 'JBL Tune 527BT', 'JBL', 54.99, 'Ref: 30458',
+                '<p>JBL Tune 527BT wireless headphones.</p>')
+    html = html.replace(
+        '<p class="product-reference">Ref: 30458</p>',
+        '<p class="product-reference"><span>Ref:</span><span>30458</span></p>',
+    )
+    result = extract_product_content(JBL, html)
+    assert result['product']['sku'] == '30458'
+    assert result['extraction_status'] == 'ok'
+
+
+def test_merchant_ref_value_in_unrelated_sibling_is_rejected():
+    html = page(JBL, 'JBL Tune 527BT', 'JBL', 54.99, 'Ref: 30458',
+                '<p>JBL Tune 527BT wireless headphones.</p>')
+    html = html.replace(
+        '<p class="product-reference">Ref: 30458</p>',
+        '<p class="product-reference"><span>Ref:</span>'
+        '<span class="related-products">99999</span></p>',
+    )
+    result = extract_product_content(JBL, html)
+    assert result['product']['sku'] is None
+    assert result['extraction_status'] == 'ok'
+
+
 def test_guanxe_sku_requires_explicit_merchant_ref():
     html = page(JBL, 'JBL Tune 527BT', 'JBL', 54.99, '',
                 '<p>Auriculares JBL Tune 527BT con sonido inalámbrico.</p>')
@@ -148,6 +173,53 @@ def test_valid_ref_replaces_eight_digit_internal_url_id_without_conflict():
     assert result['product']['url'] == url
     assert result['extraction_status'] == 'ok'
     assert 'identity_conflict' not in result['warnings']
+
+
+def test_eight_digit_guanxe_url_id_preserves_associated_jsonld_fields():
+    url = 'https://guanxe.com/es/inicio/12345678-jbl-tune-527bt.html'
+    canonical = 'https://guanxe.com/es/auriculares/12345678-jbl-tune-527bt.html'
+    html = page(
+        url, 'JBL Tune 527BT', 'JBL', 54.99, 'Ref: 30458',
+        '<p>JBL Tune 527BT wireless headphones with Pure Bass sound.</p>',
+        canonical=canonical,
+    )
+    html = html.replace('<meta property="product:price:amount" content="54.99">', '')
+    html = html.replace('<meta property="product:price:currency" content="EUR">', '')
+    assert '"sku"' not in html.split('</script>', 1)[0]
+
+    result = extract_product_content(url, html)
+    product = result['product']
+    assert set(result) == {'mode', 'extraction_status', 'source_url', 'product', 'warnings'}
+    assert result['extraction_status'] == 'ok'
+    assert result['source_url'] == url
+    assert product['sku'] == '30458'
+    assert product['brand'] == 'JBL'
+    assert product['image_url'] == 'https://cdn.guanxe.com/product.jpg'
+    assert product['price'] == 54.99
+    assert product['currency'] == 'EUR'
+    assert product['url'] == canonical
+    assert 'identity_conflict' not in result['warnings']
+
+
+def test_jsonld_for_different_guanxe_product_is_not_associated():
+    url = 'https://guanxe.com/es/inicio/12345678-jbl-tune-527bt.html'
+    other_url = 'https://guanxe.com/es/auriculares/87654321-other-product.html'
+    html = page(
+        url, 'JBL Tune 527BT', 'JBL', 54.99, 'Ref: 30458',
+        '<p>JBL Tune 527BT wireless headphones.</p>',
+    )
+    html = html.replace('"url": "' + url + '"', '"url": "' + other_url + '"')
+    html = html.replace('<meta property="product:price:amount" content="54.99">', '')
+    html = html.replace('<meta property="product:price:currency" content="EUR">', '')
+
+    result = extract_product_content(url, html)
+    product = result['product']
+    assert product['sku'] == '30458'
+    assert product['brand'] is None
+    assert product['image_url'] is None
+    assert product['price'] is None
+    assert product['currency'] is None
+    assert result['extraction_status'] == 'partial'
 
 
 def test_related_product_ref_and_article_number_do_not_become_sku():

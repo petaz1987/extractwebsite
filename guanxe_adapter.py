@@ -93,7 +93,9 @@ def _visible_ref(summary, heading):
             refs.add(m.group(1))
         elif _norm(text).strip(': ') == 'ref':
             sibling = node.find_next_sibling()
-            if sibling and len(sibling.get_text(' ', strip=True)) <= 70:
+            if (sibling and summary in sibling.parents
+                    and not _section_is_unrelated(sibling, summary)
+                    and len(sibling.get_text(' ', strip=True)) <= 70):
                 value = sibling.get_text(' ', strip=True)
                 if re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._/-]{0,63}', value):
                     refs.add(value)
