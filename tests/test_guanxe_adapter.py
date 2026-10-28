@@ -86,6 +86,97 @@ def test_s24_reference_ficha_technical_specifications():
     assert any('temporalmente agotado' in x['text'] for x in p['availability_evidence'])
 
 
+@pytest.mark.parametrize('url,product_name,row_count', [
+    (JBL, 'JBL Tune 527BT', 16),
+    (S24, 'Samsung Galaxy S24 Ultra', 4),
+])
+def test_category_heading_does_not_become_specification_group(url, product_name, row_count):
+    rows = ''.join(f'<tr><td>Dato {i}</td><td>Valor {i}</td></tr>' for i in range(row_count))
+    html = page(url, product_name, 'Brand', 54.99, 'Ref: 30458',
+                f'<h3>Herramientas para coche</h3><table>{rows}</table>')
+    result = extract_product_content(url, html)
+    specs = result['product']['specifications']
+    assert len(specs) == row_count
+    assert {item['group'] for item in specs} == {'Technical specifications'}
+    assert {(item['label'], item['value']) for item in specs} == {
+        (f'Dato {i}', f'Valor {i}') for i in range(row_count)
+    }
+
+
+def test_out_of_stock_and_low_stock_preserve_both_and_warn_conflict():
+    result = extract_product_content(JBL, page(
+        JBL, 'JBL Tune 527BT', 'JBL', 54.99, 'Ref: 30458',
+        '<p>Auriculares JBL con sonido de calidad.</p>'))
+    evidence = result['product']['availability_evidence']
+    assert any('temporalmente agotado' in item['text'] for item in evidence)
+    assert any('Últimos artículos en inventario' in item['text'] for item in evidence)
+    assert 'availability_conflict' in result['warnings']
+
+
+def test_low_stock_alone_is_not_a_conflict_or_availability_confirmation():
+    html = page(JBL, 'JBL Tune 527BT', 'JBL', 54.99, 'Ref: 30458',
+                '<p>Auriculares JBL con sonido de calidad.</p>')
+    html = html.replace('<p>Este producto está temporalmente agotado</p>', '')
+    result = extract_product_content(JBL, html)
+    assert any('Últimos artículos en inventario' in item['text']
+               for item in result['product']['availability_evidence'])
+    assert 'availability_conflict' not in result['warnings']
+    assert 'availability' not in result['product']
+
+
+def test_description_deduplicates_text_and_drops_search_promotion_and_navigation():
+    html = page(JBL, 'JBL Tune 527BT', 'JBL', 54.99, 'Ref: 30458', '''
+        <p>Auriculares JBL con sonido Pure Bass y batería de larga duración.</p>
+        <p>Auriculares JBL con sonido Pure Bass y batería de larga duración.</p>
+        <p>Resultados de búsqueda de productos relacionados con JBL.</p>
+        <nav><p>Inicio Auriculares Ofertas</p></nav>
+        <p>Disponible en Canarias, envío rápido y garantía oficial.</p>''')
+    result = extract_product_content(JBL, html)
+    description = result['product']['description']
+    assert description == 'Auriculares JBL con sonido Pure Bass y batería de larga duración.'
+    assert 'Resultados de búsqueda' not in description
+    assert 'Ofertas' not in description
+
+
+def test_category_heading_is_not_added_to_description():
+    html = page(JBL, 'JBL Tune 527BT', 'JBL', 54.99, 'Ref: 30458', '''
+        <h3>Herramientas para coche</h3>
+        <p>Auriculares JBL con sonido Pure Bass y batería de larga duración.</p>''')
+    result = extract_product_content(JBL, html)
+    assert result['product']['description'] == (
+        'Auriculares JBL con sonido Pure Bass y batería de larga duración.'
+    )
+
+
+def test_metadata_description_removes_repeated_seo_sentences():
+    repeated = 'Compra online miles de productos. '
+    html = page(JBL, 'JBL Tune 527BT', 'JBL', 54.99, 'Ref: 30458',
+                '<p>Más información</p>', description=(
+                    'Auriculares JBL con sonido Pure Bass. ' + repeated * 3
+                    + 'Resultados de búsqueda de productos relacionados.'))
+    result = extract_product_content(JBL, html)
+    assert result['product']['description'] == 'Auriculares JBL con sonido Pure Bass.'
+
+
+def test_single_description_paragraph_deduplicates_repeated_sentences():
+    sentence = 'Auriculares JBL con sonido Pure Bass.'
+    html = page(JBL, 'JBL Tune 527BT', 'JBL', 54.99, 'Ref: 30458',
+                f'<p>{sentence} {sentence} {sentence}</p>')
+    result = extract_product_content(JBL, html)
+    assert result['product']['description'] == sentence
+
+
+def test_flip_generic_or_url_identifier_is_not_merchant_ref():
+    html = page(FLIP, 'SAMSUNG Galaxy Z Flip 7 Fe 5G', 'Samsung', 899,
+                '', '<p>Smartphone plegable Samsung con pantalla AMOLED.</p>',
+                sku='4040102798')
+    html = html.replace('<p class="product-reference"></p>',
+                        '<p>EAN 8806097428367</p><p>Article number 4040102798</p>')
+    result = extract_product_content(FLIP, html)
+    assert result['product']['sku'] is None
+    assert '1019091' not in str(result['product']['sku'])
+
+
 def test_flip_nested_technical_list_and_no_false_variant():
     tech='''<h2>Samsung Galaxy Z Flip7 FE 5G</h2>
         <p>Un smartphone plegable con pantalla AMOLED.</p><h3>Características:</h3>

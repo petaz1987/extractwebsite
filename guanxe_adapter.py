@@ -20,7 +20,9 @@ _MARKETING = re.compile(r'(?:disponible en canarias|env[ií]o r[aá]pido|garant[
 _OUT = re.compile(r'(?:temporalmente agotado|sin stock|agotado|no disponible|fuera de stock)', re.I)
 _IN = re.compile(r'\b(?:en stock|stock disponible|disponible para compra|disponibilidad inmediata)\b', re.I)
 _LIMITED = re.compile(r'(?:[uú]ltimos art[ií]culos en inventario|pocas unidades)', re.I)
-_BAD_SECTION = re.compile(r'(?:related|recommend|upsell|crosssell|carrito|cart|footer|newsletter|devoluci[oó]n|returns|shipping|envios|preguntas|questions|accessori|opiniones|reviews|comparador)', re.I)
+_BAD_SECTION = re.compile(r'(?:related|recommend|upsell|crosssell|carrito|cart|footer|newsletter|devoluci[oó]n|returns|shipping|envios|preguntas|questions|accessori|opiniones|reviews|comparador|breadcrumb|navigation|main[-_ ]?menu|site[-_ ]?menu)', re.I)
+_SPEC_HEADING = re.compile(r'(?:especificaciones|caracter[ií]sticas|ficha\s+t[eé]cnica|technical\s+specifications)', re.I)
+_SEARCH_BOILERPLATE = re.compile(r'(?:resultados?\s+de\s+b[uú]squeda|b[uú]squeda\s+de\s+productos|productos\s+relacionados|tambi[eé]n\s+te\s+puede\s+interesar|descubre\s+(?:nuestra|todos)|ver\s+m[aá]s\s+productos)', re.I)
 _SELECTORS = ('#description', '#tab-description', '#more_info_sheets', '#product-description',
               '.product-description', '.product-description-container',
               '[itemprop="description"]', '#product-details', '#tab-product-details',
@@ -51,6 +53,8 @@ def is_guanxe_product(url):
 def _section_is_unrelated(node, stop=None):
     cur = node
     while isinstance(cur, Tag):
+        if cur.name == 'nav':
+            return True
         label = ' '.join([str(cur.get('id', '')), ' '.join(cur.get('class', []))])
         if _BAD_SECTION.search(label):
             return True
@@ -208,7 +212,11 @@ def _collect_specifications(sections):
             if id(table) not in allowed_ids or _section_is_unrelated(table, section):
                 continue
             previous = table.find_previous(['h2','h3','h4'])
-            group = _clean(previous.get_text(' ', strip=True)) if previous and previous in section.descendants else default_group
+            # Ignore broad category headings that precede the product's data sheet.
+            group = (_clean(previous.get_text(' ', strip=True))
+                     if previous and previous in section.descendants
+                     and _SPEC_HEADING.search(previous.get_text(' ', strip=True))
+                     else default_group)
             for row in table.find_all('tr', limit=MAX_SPECS+1):
                 cells = row.find_all(['th','td'], recursive=False)
                 if len(cells) != 2:
@@ -268,7 +276,7 @@ def _collect_specifications(sections):
     return result, truncated
 
 
-def _clean_description(sections):
+def _clean_description(sections, fallback=None):
     for section in sections:
         if _section_is_unrelated(section):
             continue
@@ -276,9 +284,10 @@ def _clean_description(sections):
         if 'detail' in label or 'feature' in label or 'ficha' in label:
             continue
         paragraphs = []
+        seen = set()
         count = 0
-        for node in section.find_all(['h2','h3','h4','p'], limit=180):
-            if node.find(['p','h2','h3','h4']) or node.find_parent(['table','li']):
+        for node in section.find_all('p', limit=180):
+            if node.find('p') or node.find_parent(['table','li']):
                 continue
             if _section_is_unrelated(node, section):
                 continue
@@ -287,10 +296,19 @@ def _clean_description(sections):
                 continue
             if _POLICY.search(text):
                 break
-            if _MARKETING.search(text):
+            clean_sentences = []
+            for sentence in re.split(r'(?<=[.!?])\s+', text):
+                sentence = _clean(sentence, MAX_DESC)
+                if not sentence or _MARKETING.search(sentence) or _SEARCH_BOILERPLATE.search(sentence):
+                    continue
+                sentence_key = _norm(sentence)
+                if sentence_key in seen:
+                    continue
+                seen.add(sentence_key)
+                clean_sentences.append(sentence)
+            text = ' '.join(clean_sentences)
+            if not text:
                 continue
-            if re.match(r'^(?:caracter[ií]sticas|especificaciones|ficha t[eé]cnica)\s*:', text, re.I):
-                break
             # A lone EAN label belongs in the specifications, not narrative.
             if _EAN_RE.fullmatch(text):
                 continue
@@ -312,6 +330,24 @@ def _clean_description(sections):
                 description = ' '.join(final) or paragraphs[0][:MAX_DESC]
             if description:
                 return description
+    # Some pages expose their only useful description through metadata. Clean
+    # sentence-level repeats and known search/promotion boilerplate before keeping it.
+    text = _clean(fallback, MAX_DESC * 2)
+    if text:
+        sentences = re.split(r'(?<=[.!?])\s+', text)
+        kept, seen = [], set()
+        for sentence in sentences:
+            sentence = _clean(sentence, MAX_DESC)
+            if not sentence or _MARKETING.search(sentence) or _SEARCH_BOILERPLATE.search(sentence):
+                continue
+            key = _norm(sentence)
+            if key in seen:
+                continue
+            seen.add(key)
+            kept.append(sentence)
+        cleaned = _clean(' '.join(kept), MAX_DESC)
+        if cleaned:
+            return cleaned
     return None
 
 
@@ -373,7 +409,7 @@ def enrich_guanxe_product(url, soup, response):
         product['specifications'] = specs
     if truncated and 'specifications_truncated' not in warnings:
         warnings.append('specifications_truncated')
-    description = _clean_description(sections)
+    description = _clean_description(sections, product.get('description'))
     if description:
         product['description'] = description
         # Generic 'field_truncated' can have come from unbounded marketing metadata.
@@ -385,7 +421,9 @@ def enrich_guanxe_product(url, soup, response):
     availability = _availability(summary, heading)
     product['availability_evidence'] = availability
     if availability:
-        positive = any(_IN.search(x['text']) for x in availability)
+        # Low-stock language contributes positive evidence for conflict detection
+        # only; it never upgrades availability by itself.
+        positive = any(_IN.search(x['text']) or _LIMITED.search(x['text']) for x in availability)
         negative = any(_OUT.search(x['text']) for x in availability)
         if positive and negative and 'availability_conflict' not in warnings:
             warnings.append('availability_conflict')
