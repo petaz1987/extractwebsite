@@ -7,6 +7,7 @@ from decimal import Decimal, InvalidOperation
 from urllib.parse import unquote, urljoin, urlsplit
 
 from bs4 import BeautifulSoup, Tag
+from guanxe_adapter import is_guanxe_product, same_guanxe_identity, trusted_reference, enrich_guanxe_product
 
 
 MAX_PRODUCT_NAME_LENGTH = 1000
@@ -605,7 +606,9 @@ def extract_product_content(final_url, html, content_status="ok"):
     heading, context = _find_main_context(soup)
     raw_h1_name = heading.get_text(" ", strip=True) if heading else None
     h1_name = _clean(raw_h1_name, MAX_PRODUCT_NAME_LENGTH)
-    url_sku = _url_sku(final_url)
+    guanxe_page = is_guanxe_product(final_url)
+    # Guanxe's numeric path ID is an internal product identity, not its merchant SKU.
+    url_sku = None if guanxe_page else _url_sku(final_url)
     visible_skus = _article_numbers(context)
     visible_skus = _distinct(visible_skus)
 
@@ -637,15 +640,23 @@ def extract_product_content(final_url, html, content_status="ok"):
         record for record in jsonld_records
         if target_sku and _record_sku(record) == target_sku
     ]
-    if not matching_jsonld and not target_sku:
-        matching_jsonld = [record for record in jsonld_records if _same_page_url(_record_url(record), final_url)]
+    if not matching_jsonld and (not target_sku or guanxe_page):
+        # For Guanxe, a generic article number must not prevent association by the
+        # verified host + internal product ID in the structured URL.
+        matching_jsonld = [record for record in jsonld_records if (
+            _same_page_url(_record_url(record), final_url)
+            or (guanxe_page and same_guanxe_identity(final_url, _record_url(record)))
+        )]
 
     def associated(record):
         record_url = _record_url(record)
         resolved_record_url = _resolved_http_url(final_url, record_url) if record_url else None
         return not record_url or (
             resolved_record_url
-            and _same_page_url(resolved_record_url, final_url, allow_http_scheme_match=True)
+            and (
+                _same_page_url(resolved_record_url, final_url, allow_http_scheme_match=True)
+                or (guanxe_page and same_guanxe_identity(final_url, resolved_record_url))
+            )
         )
 
     if any(not associated(record) for record in matching_jsonld):
@@ -679,9 +690,10 @@ def extract_product_content(final_url, html, content_status="ok"):
         warning_codes.append("identity_conflict")
 
     has_pdp_path = bool(re.search(r"/(?:pd|product|p)/", urlsplit(final_url).path, re.I))
+    guanxe_ref = trusted_reference(soup) if guanxe_page else None
     identity_evidence = bool(
         matching_gtags or matching_jsonld or visible_skus
-        or (target_sku and has_pdp_path)
+        or (target_sku and has_pdp_path) or guanxe_ref
     )
     if not name or not identity_evidence:
         return _response(final_url, "no_product", warnings=warning_codes)
@@ -689,6 +701,10 @@ def extract_product_content(final_url, html, content_status="ok"):
     product = _empty_product()
     product["name"] = name
     product["sku"] = target_sku
+    if guanxe_page and (guanxe_ref is None or url_sku is not None):
+        # Keep generic identity evidence for matching above, but never expose an
+        # inferred URL/article number as Guanxe's merchant SKU.
+        product["sku"] = None
     product["url"] = final_url
     embedded_variant = _clean(
         (gtag or {}).get("item_variant") or (record or {}).get("color") or (record or {}).get("size")
@@ -781,4 +797,5 @@ def extract_product_content(final_url, html, content_status="ok"):
         or "identity_conflict" in warning_codes or "currency_conflict" in warning_codes
     ):
         status = "partial"
-    return _response(final_url, status, product, warning_codes)
+    result = _response(final_url, status, product, warning_codes)
+    return enrich_guanxe_product(final_url, soup, result)
