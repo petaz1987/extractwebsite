@@ -76,7 +76,7 @@ def _summary(heading):
 
 
 def _visible_ref(summary, heading):
-    if not summary:
+    if not summary or _section_is_unrelated(summary):
         return None, False
     # In a full product container, only inspect the header region up to the description tabs.
     refs = set()
@@ -113,7 +113,9 @@ def _relevant_sections(soup):
     sections = []
     for selector in _SELECTORS:
         for node in soup.select(selector)[:8]:
-            if _section_is_unrelated(node, node):
+            # A matching ID/class inside a recommendation is not trustworthy just
+            # because the selected node itself has a product-like name.
+            if _section_is_unrelated(node):
                 continue
             if any(selected is node or selected in node.parents or node in selected.parents
                    for selected in sections):
@@ -141,14 +143,26 @@ def same_guanxe_identity(url, record_url):
 
 
 def _canonical(soup, url):
-    source = urlsplit(url)
+    try:
+        source = urlsplit(url)
+        source_host = (source.hostname or '').lower()
+        if (source.scheme != 'https' or source_host not in {'guanxe.com', 'www.guanxe.com'}
+                or source.username is not None or source.password is not None
+                or source.port not in (None, 443)):
+            return url
+    except (TypeError, ValueError):
+        return url
     for node in soup.select('link[rel="canonical"][href]')[:2]:
-        candidate = urljoin(url, node.get('href', ''))
         try:
+            candidate = urljoin(url, node.get('href', ''))
             target = urlsplit(candidate)
             src_match = _PRODUCT_PATH.fullmatch(source.path)
             target_match = _PRODUCT_PATH.fullmatch(target.path)
-            if (target.scheme == 'https' and target.hostname == source.hostname
+            target_host = (target.hostname or '').lower()
+            if (target.scheme == 'https' and target_host == source_host
+                    and target_host in {'guanxe.com', 'www.guanxe.com'}
+                    and target.username is None and target.password is None
+                    and target.port in (None, 443)
                     and not target.query and not target.fragment and src_match and target_match
                     and target_match.group(1) == src_match.group(1)):
                 return candidate
@@ -176,7 +190,7 @@ def _collect_specifications(sections):
         seen.add(key)
         result.append({'group':_clean(group) or 'Technical specifications', 'label':label.rstrip(':'), 'value':value})
     for section in sections:
-        if _section_is_unrelated(section, section):
+        if _section_is_unrelated(section):
             continue
         # A returns-policy block embedded in a description is not a specification.
         allowed_ids = set()
@@ -254,7 +268,7 @@ def _collect_specifications(sections):
 
 def _clean_description(sections):
     for section in sections:
-        if _section_is_unrelated(section, section):
+        if _section_is_unrelated(section):
             continue
         label = _norm(str(section.get('id', ''))+' '+' '.join(section.get('class', [])))
         if 'detail' in label or 'feature' in label or 'ficha' in label:
@@ -300,7 +314,7 @@ def _clean_description(sections):
 
 
 def _availability(summary, heading):
-    if not summary:
+    if not summary or _section_is_unrelated(summary):
         return []
     evidence, seen = [], set()
     # Only short visible leaf nodes from product summary, excluding recommendations.
@@ -347,8 +361,9 @@ def enrich_guanxe_product(url, soup, response):
             if 'identity_conflict' not in warnings:
                 warnings.append('identity_conflict')
             response['extraction_status'] = 'partial'
-        else:
-            product['sku'] = reference
+    # The generic parser can infer an article number or URL ID. Guanxe's SKU
+    # contract accepts only the single visible merchant Ref validated above.
+    product['sku'] = reference
     product['url'] = _canonical(soup, url)
     sections = _relevant_sections(soup)
     specs, truncated = _collect_specifications(sections)

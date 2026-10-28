@@ -686,7 +686,8 @@ def extract_product_content(final_url, html, content_status="ok"):
         warning_codes.append("identity_conflict")
 
     has_pdp_path = bool(re.search(r"/(?:pd|product|p)/", urlsplit(final_url).path, re.I))
-    guanxe_ref = trusted_reference(soup) if is_guanxe_product(final_url) else None
+    guanxe_page = is_guanxe_product(final_url)
+    guanxe_ref = trusted_reference(soup) if guanxe_page else None
     identity_evidence = bool(
         matching_gtags or matching_jsonld or visible_skus
         or (target_sku and has_pdp_path) or guanxe_ref
@@ -697,6 +698,10 @@ def extract_product_content(final_url, html, content_status="ok"):
     product = _empty_product()
     product["name"] = name
     product["sku"] = target_sku
+    if guanxe_page and (guanxe_ref is None or url_sku is not None):
+        # Keep generic identity evidence for matching above, but never expose an
+        # inferred URL/article number as Guanxe's merchant SKU.
+        product["sku"] = None
     product["url"] = final_url
     embedded_variant = _clean(
         (gtag or {}).get("item_variant") or (record or {}).get("color") or (record or {}).get("size")

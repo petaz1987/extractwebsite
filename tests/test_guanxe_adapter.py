@@ -6,6 +6,8 @@ labels; full live HTML must still be verified before approval.
 import json
 from time import perf_counter
 
+import pytest
+
 from product_extraction import extract_product_content
 from guanxe_adapter import is_guanxe_product
 
@@ -117,6 +119,94 @@ def test_conflicting_visible_refs_do_not_leak_related_product():
     assert 'identity_conflict' in result['warnings']
 
 
+def test_guanxe_sku_requires_explicit_merchant_ref():
+    html = page(JBL, 'JBL Tune 527BT', 'JBL', 54.99, '',
+                '<p>Auriculares JBL Tune 527BT con sonido inalámbrico.</p>')
+    html = html.replace('<p class="product-reference"></p>',
+                        '<p>Article number 12345678</p>')
+    result = extract_product_content(JBL, html)
+    assert result['extraction_status'] == 'ok'
+    assert result['product']['sku'] is None
+    # The URL contains Guanxe's internal ID and an EAN suffix; neither is a SKU.
+    assert '1019091-' in JBL and '1200130020902' in JBL
+
+
+def test_guanxe_url_internal_id_and_ean_are_not_sku():
+    html = page(JBL, 'JBL Tune 527BT', 'JBL', 54.99, '',
+                '<p>Auriculares JBL Tune 527BT con sonido inalámbrico.</p>')
+    result = extract_product_content(JBL, html)
+    assert result['extraction_status'] == 'ok'
+    assert result['product']['sku'] is None
+
+
+def test_valid_ref_replaces_eight_digit_internal_url_id_without_conflict():
+    url = JBL.replace('/1019091-', '/10190918-')
+    html = page(url, 'JBL Tune 527BT', 'JBL', 54.99, 'Ref: 30458',
+                '<p>Auriculares JBL Tune 527BT con sonido inalámbrico.</p>')
+    result = extract_product_content(url, html)
+    assert result['product']['sku'] == '30458'
+    assert result['product']['url'] == url
+    assert result['extraction_status'] == 'ok'
+    assert 'identity_conflict' not in result['warnings']
+
+
+def test_related_product_ref_and_article_number_do_not_become_sku():
+    html = page(JBL, 'JBL Tune 527BT', 'JBL', 54.99, '',
+                '<p>Auriculares JBL Tune 527BT con sonido inalámbrico.</p>')
+    html = html.replace(
+        '</div></div>\n    <div id="description">',
+        '<aside class="related-products"><p>Ref: 99999</p><p>Article number 12345678</p></aside>'
+        '</div></div>\n    <div id="description">',
+    )
+    result = extract_product_content(JBL, html)
+    assert result['product']['sku'] is None
+
+
+def test_nested_related_description_specs_and_stock_are_excluded():
+    html = page(
+        JBL, 'JBL Tune 527BT', 'JBL', 54.99, 'Ref: 30458',
+        '''<p>JBL Tune 527BT wireless headphones with Pure Bass sound.</p>
+        <h3>Especificaciones Técnicas</h3>
+        <table><tr><th>Bluetooth</th><td>5.3</td></tr></table>''',
+    )
+    html = html.replace(
+        '<span>Advertencia: ¡Últimos artículos en inventario!</span>',
+        '<span>Advertencia: ¡Últimos artículos en inventario!</span>'
+        '<div class="related-products"><p>Ref: 99999</p><p>Article number 99999999</p>'
+        '<p>En stock en tienda de producto recomendado</p></div>',
+    )
+    html = html.replace(
+        '</body>',
+        '''<aside class="related-products"><div id="description">
+        <p>Recommended unrelated product description that must not replace JBL details.</p>
+        <h3>Especificaciones Técnicas</h3>
+        <table><tr><th>RAM</th><td>999 GB</td></tr></table>
+        <p>Stock disponible para el producto recomendado</p>
+        </div></aside></body>''',
+    )
+    result = extract_product_content(JBL, html)
+    product = result['product']
+    assert product['sku'] == '30458'
+    assert 'wireless headphones' in product['description']
+    assert 'Recommended unrelated' not in product['description']
+    assert ('Bluetooth', '5.3') in {(x['label'], x['value']) for x in product['specifications']}
+    assert ('RAM', '999 GB') not in {(x['label'], x['value']) for x in product['specifications']}
+    assert all('recommended' not in item['text'].casefold() for item in product['availability_evidence'])
+
+
+def test_trusted_ref_wins_over_generic_article_number_and_marks_conflict():
+    html = page(JBL, 'JBL Tune 527BT', 'JBL', 54.99, 'Ref: 30458',
+                '<p>JBL Tune 527BT wireless headphones.</p>')
+    html = html.replace(
+        '<p class="product-reference">Ref: 30458</p>',
+        '<p class="product-reference">Ref: 30458</p><p>Article number 12345678</p>',
+    )
+    result = extract_product_content(JBL, html)
+    assert result['product']['sku'] == '30458'
+    assert result['extraction_status'] == 'partial'
+    assert 'identity_conflict' in result['warnings']
+
+
 def test_only_real_product_pages_are_enriched():
     assert not is_guanxe_product('https://evilguanxe.com/es/inicio/123456-anything.html')
     assert not is_guanxe_product('http://guanxe.com/es/inicio/123456-anything.html')
@@ -157,6 +247,20 @@ def test_canonical_wrong_id_is_not_trusted():
               '<p>Auriculares JBL Tune 527BT.</p>',canonical=other)
     result=extract_product_content(JBL,html)
     assert result['product']['url']==JBL
+
+
+@pytest.mark.parametrize('canonical', [
+    'https://review-user@guanxe.com/es/auriculares/1019091-jbl-tune-527bt.html',
+    'https://guanxe.com:8443/es/auriculares/1019091-jbl-tune-527bt.html',
+    'https://evil.example/es/auriculares/1019091-jbl-tune-527bt.html',
+    'http://guanxe.com/es/auriculares/1019091-jbl-tune-527bt.html',
+])
+def test_invalid_canonical_authority_falls_back_to_fetched_url(canonical):
+    html = page(JBL, 'JBL Tune 527BT', 'JBL', 54.99, 'Ref: 30458',
+                '<p>JBL headphones with wireless audio and a long battery life.</p>',
+                canonical=canonical)
+    result = extract_product_content(JBL, html)
+    assert result['product']['url'] == JBL
 
 
 def test_non_guanxe_generic_product_is_unchanged_by_enrichment():
