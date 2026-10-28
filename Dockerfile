@@ -15,9 +15,9 @@ COPY requirements.txt ./
 RUN python -m pip install --no-cache-dir -r requirements.txt
 
 # Ship only the runtime files; no local credentials, fixtures or test artifacts.
-COPY main.py product_extraction.py search_extraction.py worten_adapter.py ./
+COPY main.py product_extraction.py search_extraction.py worten_adapter.py dev_compare.py ./
 
 EXPOSE 10000
 
 # Log the effective curl version in Render, then preserve the existing app start.
-CMD ["sh", "-c", "curl --version && exec python main.py"]
+CMD ["sh", "-c", "curl --version && python dev_compare.py; exec python main.py"]
