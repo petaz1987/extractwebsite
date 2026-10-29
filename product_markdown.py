@@ -34,8 +34,7 @@ _TECH_PANEL_MARKERS = (
     "productfeatures", "caracteristicastecnicas", "fichatecnica",
 )
 _PRODUCT_SCOPE_MARKERS = {
-    "productcard", "producttile", "productitem", "productdetail", "productinformation",
-    "pdp", "pip",
+    "productcard", "producttile", "productitem", "productdetail", "pdp", "pip",
 }
 _UNRELATED_MARKERS = (
     "related", "recommend", "upsell", "crosssell", "productcarousel", "productlist",
@@ -101,14 +100,17 @@ def _is_unrelated(node, *, trusted_hidden=(), allow_hidden_node=False):
 
 
 def _product_scope(node):
-    """Return the nearest explicit product owner for a node, if present."""
+    """Return the nearest product boundary, ignoring nested information wrappers."""
     current = node
     while isinstance(current, Tag):
         if current.name == "article":
             return current
         labels = [str(current.get("id", "")), *current.get("class", [])]
         normalized = {re.sub(r"[^a-z0-9]", "", label.casefold()) for label in labels}
-        if normalized & _PRODUCT_SCOPE_MARKERS:
+        if normalized & _PRODUCT_SCOPE_MARKERS or any(
+            re.fullmatch(r"product(?:card|tile)(?:item|product)", label)
+            for label in normalized
+        ):
             return current
         current = current.parent
     return None
@@ -359,7 +361,8 @@ def _escape_markdown(value):
     # such as decimal points and hyphens within words (e.g. Wi-Fi, 5.3).
     value = re.sub(r"([\\`*_{}\[\]()|])", r"\\\1", value)
     value = re.sub(r"<", r"\\<", value)
-    value = re.sub(r"(?m)^([ \t]*)([#>]|-(?=\s))", r"\1\\\2", value)
+    value = re.sub(r"(?m)^([ \t]*)(\d+)([.)])(?=\s)", r"\1\2\\\3", value)
+    value = re.sub(r"(?m)^([ \t]*)([#>+]|-(?=\s))", r"\1\\\2", value)
     return value
 
 

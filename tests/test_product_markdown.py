@@ -217,6 +217,32 @@ def test_div_product_card_tabs_cannot_contaminate_selected_product():
     assert "Other RAM" not in str(product)
 
 
+def test_nested_product_information_wrapper_shares_product_tab_ownership():
+    html = """<html><head>
+      <meta property='product:price:amount' content='24.99'>
+      <meta property='product:price:currency' content='EUR'></head><body><main>
+      <div class='product-detail'><div class='product-information'><h1>Camera</h1>
+        <p>Article number 12345678</p></div>
+        <a href='#tech'>Ficha técnica</a>
+        <section id='tech'>Camera sensor 24 MP</section>
+      </div></main></body></html>"""
+    product = extract_product_content(URL, html)["product"]
+    assert product["technical_details_markdown"] == "Camera sensor 24 MP"
+
+
+def test_product_card_item_with_tab_cannot_contaminate_selected_product():
+    html = _page("<div id='description'><p>Correct.</p></div>", extra="""
+      <div class='product-card-item'><h2>Other item</h2>
+        <button role='tab' aria-controls='other-tech'>Ficha técnica</button>
+        <section id='other-tech'><table><tr><th>Other RAM</th><td>999 GB</td></tr></table></section>
+      </div>
+    """)
+    product = extract_product_content(URL, html)["product"]
+    assert product["details_markdown"] == "Correct."
+    assert product["technical_details_markdown"] is None
+    assert "Other RAM" not in str(product)
+
+
 def test_both_panel_nesting_directions_keep_every_selected_section():
     html = _page("""
       <a role='tab' href='#outer-tech'>Ficha técnica</a>
@@ -329,6 +355,15 @@ def test_heading_list_and_html_like_source_text_are_rendered_literally():
     assert r"\- Not a list item" in markdown
     assert r"\<img src=x onerror=alert\(1\)>" in markdown
     assert r"\[link\]\(https://evil.example\)" in markdown
+
+
+def test_paragraph_ordered_and_plus_prefixes_remain_literal_prose():
+    html = _page("""
+      <div id='description'><p>1. This is prose, not a list.</p>
+        <p>+ This is prose, not a list.</p></div>
+    """)
+    markdown = extract_product_content(URL, html)["product"]["details_markdown"]
+    assert markdown == r"1\. This is prose, not a list." + "\n\n" + r"\+ This is prose, not a list."
 
 
 def test_html_comments_are_not_rendered():
