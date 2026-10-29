@@ -537,12 +537,18 @@ def extract_product_content(url):
     soup = BeautifulSoup(html, "html.parser")
     title = soup.title.get_text(" ", strip=True) if soup.title else ""
     assessment = _content_assessment(title, _fallback_text(soup))
-    result = _extract_product_html(final_url, html, content_status=assessment["content_status"])
+    timing = {}
+    result = _extract_product_html(
+        final_url, html, content_status=assessment["content_status"], timing=timing
+    )
     total_end = time.perf_counter()
+    markdown_ms = timing.get("markdown_ms", 0.0)
+    parse_ms = max(0.0, (total_end - fetch_end) * 1000 - markdown_ms)
     LOG.info(
-        "Product extraction timing: fetch_ms=%.1f parse_ms=%.1f total_ms=%.1f html_chars=%d status_code=%d",
+        "Product extraction timing: fetch_ms=%.1f parse_ms=%.1f markdown_ms=%.1f total_ms=%.1f html_chars=%d status_code=%d",
         (fetch_end - total_start) * 1000,
-        (total_end - fetch_end) * 1000,
+        parse_ms,
+        markdown_ms,
         (total_end - total_start) * 1000,
         len(html),
         status_code,
