@@ -338,7 +338,7 @@ def _clean_description(sections, fallback=None):
                 return description, source_truncated or len(description) >= MAX_DESC
     # Some pages expose their only useful description through metadata. Clean
     # sentence-level repeats and known search/promotion boilerplate before keeping it.
-    text = _clean(fallback, MAX_DESC * 2)
+    text = _clean(fallback, MAX_SOURCE_DESC)
     if text:
         sentences = re.split(r'(?<=[.!?])\s+', text)
         kept, seen = [], set()

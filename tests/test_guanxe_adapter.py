@@ -169,6 +169,18 @@ def test_untruncated_trusted_description_recovers_text_after_5000_chars():
     assert 'field_truncated' not in result['warnings']
 
 
+def test_trusted_description_recovers_text_after_10000_chars():
+    boilerplate = 'Resultados de búsqueda de productos relacionados con JBL. '
+    useful = 'Los JBL Tune 527BT ofrecen sonido Pure Bass y batería duradera.'
+    source = (boilerplate * 200) + useful
+    assert 10000 < source.index(useful) < 20000
+    html = page(JBL, 'JBL Tune 527BT', 'JBL', 54.99, 'Ref: 30458',
+                '<p>Más información</p>', description=source)
+    result = extract_product_content(JBL, html)
+    assert result['product']['description'] == useful
+    assert 'field_truncated' not in result['warnings']
+
+
 def test_source_description_cap_keeps_truncation_warning_and_drops_seo_only_text():
     boilerplate = 'Resultados de búsqueda de productos relacionados con JBL. '
     useful_beyond_cap = 'Los auriculares ofrecen sonido JBL Pure Bass.'
