@@ -105,6 +105,13 @@ def _product_scope(node):
     while isinstance(current, Tag):
         if current.name == "article":
             return current
+        # PrestaShop PDPs can use the body itself as the product wrapper,
+        # with sibling product controls and panels and no <main> element.
+        if (current.name == "body" and current.get("id") == "product"
+                and "product" in current.get("class", [])
+                and len([label for label in current.get("class", [])
+                         if re.fullmatch(r"product-\d+", label)]) == 1):
+            return current
         labels = [str(current.get("id", "")), *current.get("class", [])]
         normalized = {re.sub(r"[^a-z0-9]", "", label.casefold()) for label in labels}
         if normalized & _PRODUCT_SCOPE_MARKERS or any(
@@ -192,12 +199,14 @@ def _collect_panels(document, context):
         if not targets:
             missing.add(kind)
             continue
+        accepted_target = False
         for target in targets:
             target_product = _product_scope(target)
             if target_product is not None and target_product is not context_scope:
                 continue
             if not _is_unrelated(target, allow_hidden_node=True):
                 _append_unique(panels, kind, target)
+                accepted_target = True
             elif not any(marker in " ".join(target.get("class", [])).casefold() for marker in _UNRELATED_MARKERS):
                 # Inactive tabs can be wrapped in a hidden region. Trust only the
                 # hidden ancestors on this explicitly linked target's own chain.
@@ -208,6 +217,9 @@ def _collect_panels(document, context):
                                     if ancestor.has_attr("hidden") or str(ancestor.get("aria-hidden", "")).casefold() == "true"]
                     if hidden_roots and not any(_is_unrelated(ancestor, allow_hidden_node=True) for ancestor in hidden_roots):
                         _append_unique(panels, kind, target)
+                        accepted_target = True
+        if not accepted_target:
+            missing.add(kind)
     return panels, missing
 
 

@@ -13,6 +13,84 @@ def _page(content, *, extra=""):
     </article>{extra}</main></body></html>"""
 
 
+def _prestashop_page(content, *, extra=""):
+    # Sanitized shape from the authentic Guanxe PDPs: no main/article owner.
+    return f"""<html><head><meta property='product:price:amount' content='54.99'>
+      <meta property='product:price:currency' content='EUR'></head>
+      <body id='product' class='product product-1019091 layout-fullwidth'>
+      <div id='columns'><div class='main-content'><div id='center_column'>
+        <div class='primary_block'><h1>Example product</h1>
+          <p>Article number 12345678</p></div>
+        <div id='more_info_tabs' class='tabs-info tab-v4'>
+          <ul class='nav nav-tabs'><li><a href='#producttab-description'>Más información</a></li></ul>
+          <div class='tab-content'><div id='producttab-description' class='tab-pane fade'>
+            {content}</div></div>
+        </div>{extra}
+      </div></div></div></body></html>"""
+
+
+def test_guanxe_jbl_body_owned_tab_preserves_description_features_and_table():
+    html = _prestashop_page("""<p>Disfruta del legendario sonido JBL Pure Bass.</p>
+      <ul><li>Hasta 57 horas de autonomía</li><li>Diseño plegable y ligero</li></ul>
+      <table><tr><th>Especificación</th><th>Detalle</th></tr>
+        <tr><td>Tamaño del controlador</td><td>33 mm</td></tr>
+        <tr><td>Versión de Bluetooth</td><td>5.3</td></tr></table>""", extra="""
+      <div class='product-card-item'><a href='#other-specs'>Ficha técnica</a>
+        <div id='other-specs'>Other RAM: 999 GB</div></div>""")
+    result = extract_product_content(URL, html)
+    product = result['product']
+    assert 'Disfruta del legendario sonido JBL Pure Bass.' in product['details_markdown']
+    assert '- Hasta 57 horas de autonomía' in product['details_markdown']
+    assert '| Especificación | Detalle |' in product['details_markdown']
+    assert '| Tamaño del controlador | 33 mm |' in product['details_markdown']
+    assert '| Versión de Bluetooth | 5.3 |' in product['details_markdown']
+    assert product['technical_details_markdown'] is None
+    assert '999 GB' not in str(product)
+    assert not result['warnings']
+
+
+def test_guanxe_s24_body_owned_tab_preserves_prose_without_technical_panel():
+    html = _prestashop_page('''<p>Un diseño de referencia con ADN Galaxy</p>
+      <p>El Galaxy S24 Ultra presenta el diseño icónico de la serie Ultra.</p>
+      <p>La batería de tu Galaxy S24 Ultra tiene 5000 mAh.</p>''')
+    result = extract_product_content(URL, html)
+    details = result['product']['details_markdown']
+    assert 'Un diseño de referencia con ADN Galaxy' in details
+    assert 'El Galaxy S24 Ultra presenta el diseño icónico de la serie Ultra.' in details
+    assert '5000 mAh.' in details
+    assert result['product']['technical_details_markdown'] is None
+    assert not result['warnings']
+
+
+def test_owned_tab_with_rejected_target_warns_but_absent_tab_does_not():
+    html = _prestashop_page('<p>Product details.</p>', extra="""
+      <a href='#unrelated-tech'>Ficha técnica</a>
+      <div class='product-card-item'><div id='unrelated-tech'>Other RAM: 999 GB</div></div>""")
+    result = extract_product_content(URL, html)
+    assert result['product']['technical_details_markdown'] is None
+    assert 'technical_details_extraction_failed' in result['warnings']
+    assert not extract_product_content(URL, _page(''))['warnings']
+
+
+def test_guanxe_s24_actual_separate_datasheet_is_preserved():
+    html = _prestashop_page('<p>Un diseño de referencia con ADN Galaxy</p>', extra='''
+      <div class='tabs-info'><ul class='nav nav-tabs'>
+        <li><a href='#producttab-datasheet' data-toggle='tab'>Ficha técnica</a></li></ul>
+        <div class='tab-content'><div id='producttab-datasheet' class='fade tab-pane'>
+          <table><tr><td>Batería</td><td>5000mAh</td></tr>
+            <tr><td>Capacidad</td><td>512GB</td></tr>
+            <tr><td>Pulgadas (tablet)</td><td>6.8"</td></tr>
+            <tr><td>RAM</td><td>12GB</td></tr></table>
+        </div></div></div>''')
+    result = extract_product_content(URL, html)
+    technical = result['product']['technical_details_markdown']
+    assert '| Batería | 5000mAh |' in technical
+    assert '| Capacidad | 512GB |' in technical
+    assert '| RAM | 12GB |' in technical
+    assert 'ADN Galaxy' not in technical
+    assert not result['warnings']
+
+
 def test_tab_relationships_split_details_from_separate_technical_panel():
     html = _page("""
       <div role='tablist'>
