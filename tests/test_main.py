@@ -309,6 +309,14 @@ def test_product_mode_uses_one_existing_fetch_and_rejects_include_links(client, 
     assert result["extraction_status"] == "ok"
     assert result["product"]["sku"] == "12345678"
     assert result["product"]["url"] == final_url
+    assert set(result["product"]) == {
+        "name", "sku", "brand", "price", "original_price", "currency", "variant", "url",
+        "image_url", "availability_evidence", "details_markdown", "technical_details_markdown",
+    }
+    assert result["product"]["details_markdown"] is None
+    assert result["product"]["technical_details_markdown"] is None
+    assert "description" not in result["product"]
+    assert "specifications" not in result["product"]
     assert "raw_html" not in result
     assert "links" not in result
     assert calls == [requested_url]

@@ -367,20 +367,6 @@ def enrich_guanxe_product(url, soup, response):
     # contract accepts only the single visible merchant Ref validated above.
     product['sku'] = reference
     product['url'] = _canonical(soup, url)
-    sections = _relevant_sections(soup)
-    specs, truncated = _collect_specifications(sections)
-    if specs:
-        product['specifications'] = specs
-    if truncated and 'specifications_truncated' not in warnings:
-        warnings.append('specifications_truncated')
-    description = _clean_description(sections)
-    if description:
-        product['description'] = description
-        # Generic 'field_truncated' can have come from unbounded marketing metadata.
-        # Retain this warning when an unrelated field is still oversized/ambiguous;
-        # remove only when original product name is within its limit.
-        if 'field_truncated' in warnings and len(heading.get_text(' ',strip=True))<=1000:
-            warnings.remove('field_truncated')
     product['variant'] = None  # Never infer chosen variants from title or generic size/color.
     availability = _availability(summary, heading)
     product['availability_evidence'] = availability

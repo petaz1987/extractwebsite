@@ -4,9 +4,11 @@ import json
 import re
 import unicodedata
 from decimal import Decimal, InvalidOperation
+from time import perf_counter
 from urllib.parse import unquote, urljoin, urlsplit
 
 from bs4 import BeautifulSoup, Tag
+from product_markdown import extract_product_markdown
 from guanxe_adapter import is_guanxe_product, same_guanxe_identity, trusted_reference, enrich_guanxe_product
 
 
@@ -581,9 +583,9 @@ def _empty_product():
         "variant": None,
         "url": None,
         "image_url": None,
-        "description": None,
-        "specifications": [],
         "availability_evidence": [],
+        "details_markdown": None,
+        "technical_details_markdown": None,
     }
 
 
@@ -597,7 +599,7 @@ def _response(final_url, status, product=None, warnings=None):
     }
 
 
-def extract_product_content(final_url, html, content_status="ok"):
+def extract_product_content(final_url, html, content_status="ok", *, timing=None):
     """Extract one product from already-fetched HTML; never performs network I/O."""
     if content_status in {"blocked", "empty"} or not isinstance(html, str) or not html.strip():
         return _response(final_url, "unusable")
@@ -718,12 +720,6 @@ def extract_product_content(final_url, html, content_status="ok"):
         if len(images) == 1:
             product["image_url"] = _resolved_http_url(final_url, images[0])
 
-    descriptions = _meta_values(soup, "description") or _meta_values(soup, "og:description")
-    product["description"] = _clean((record or {}).get("description") or (descriptions[0] if descriptions else None), MAX_PRODUCT_DESCRIPTION_LENGTH)
-    raw_description = (record or {}).get("description") or (descriptions[0] if descriptions else None)
-    if _would_truncate(raw_description, MAX_PRODUCT_DESCRIPTION_LENGTH):
-        warning_codes.append("field_truncated")
-
     current_dom_prices, original_prices = _price_evidence(context)
     gtag_price = _number((gtag or {}).get("price"))
     record_price, record_currency = _record_price(record or {})
@@ -783,10 +779,6 @@ def extract_product_content(final_url, html, content_status="ok"):
     elif len(old_unique) > 1:
         warning_codes.append("original_price_ambiguous")
 
-    specifications, specs_truncated = _specifications(context, soup)
-    product["specifications"] = specifications
-    if specs_truncated:
-        warning_codes.append("specifications_truncated")
     product["availability_evidence"], availability_truncated = _availability_evidence(soup)
     if availability_truncated:
         warning_codes.append("availability_truncated")
@@ -798,4 +790,13 @@ def extract_product_content(final_url, html, content_status="ok"):
     ):
         status = "partial"
     result = _response(final_url, status, product, warning_codes)
-    return enrich_guanxe_product(final_url, soup, result)
+    result = enrich_guanxe_product(final_url, soup, result)
+    markdown_started = perf_counter()
+    markdown_fields, markdown_warnings = extract_product_markdown(soup, context)
+    if timing is not None:
+        timing["markdown_ms"] = (perf_counter() - markdown_started) * 1000
+    result["product"].update(markdown_fields)
+    result["warnings"] = list(dict.fromkeys(
+        [*result["warnings"], *markdown_warnings]
+    ))[:MAX_PRODUCT_WARNINGS]
+    return result

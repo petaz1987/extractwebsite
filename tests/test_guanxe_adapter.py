@@ -17,7 +17,7 @@ S24 = 'https://guanxe.com/es/smartphones/712264-samsung-galaxy-s24-ultra-12gb-51
 FLIP = 'https://guanxe.com/es/smartphones/1047586-samsung-galaxy-z-flip-7-fe-5g-8gb-256gb-negro-sm-761b-8806097428367.html'
 
 
-def page(url, name, brand, price, summary, details, *, description=None, canonical=None, sku=None):
+def page(url, name, brand, price, summary, details, *, technical=None, description=None, canonical=None, sku=None):
     product = {'@type':'Product','name':name,'url':url,'brand':{'name':brand},
                'image':'https://cdn.guanxe.com/product.jpg',
                'offers':{'price':str(price),'priceCurrency':'EUR'},
@@ -33,7 +33,11 @@ def page(url, name, brand, price, summary, details, *, description=None, canonic
       <span>Advertencia: ¡Últimos artículos en inventario!</span>
       <p>Disponible en Canarias - Envío rápido - Garantía Oficial</p>
       </div></div>
+    <ul role="tablist"><li><a role="tab" href="#description">Más información</a></li>
+      {('<li><a role="tab" href="#product-details">Ficha técnica</a></li>' if technical is not None else '')}
+    </ul>
     <div id="description">{details}</div>
+    {(f'<div id="product-details">{technical}</div>' if technical is not None else '')}
     <aside class="related-products"><p>Ref: 999999</p><table><tr><td>RAM</td><td>999 GB</td></tr></table>
     <p>Stock disponible</p></aside></main></body></html>'''
 
@@ -58,11 +62,14 @@ def test_jbl_reference_table_description_and_canonical():
     assert p['sku']=='30458' and p['url']==JBL_CANON
     assert p['brand']=='JBL' and p['price']==54.99 and p['currency']=='EUR'
     assert p['variant'] is None
-    assert len([x for x in p['specifications'] if x['label']=='Tamaño del controlador'])==1
-    assert ('Versión de Bluetooth','5.3') in {(x['label'],x['value']) for x in p['specifications']}
-    assert ('EAN','1200130020902') in {(x['label'],x['value']) for x in p['specifications']}
-    assert 'devolución' not in p['description']
-    assert all('999' not in str(x) for x in p['specifications'])
+    assert 'Disfruta del sonido JBL Pure Bass' in p['details_markdown']
+    assert '| Especificación | Detalle |' in p['details_markdown']
+    assert '| Versión de Bluetooth | 5.3 |' in p['details_markdown']
+    assert 'EAN 1200130020902' in p['details_markdown']
+    assert 'devolución' not in p['details_markdown']
+    assert '999' not in p['details_markdown']
+    assert p['technical_details_markdown'] is None
+    assert 'description' not in p and 'specifications' not in p
     assert all('Disponible en Canarias' not in x['text'] for x in p['availability_evidence'])
     assert any('temporalmente agotado' in x['text'] for x in p['availability_evidence'])
 
@@ -71,18 +78,22 @@ def test_s24_reference_ficha_technical_specifications():
     html = page(S24,'SAMSUNG Galaxy S24 Ultra 12GB 512GB SM-S928B/DS','Samsung',1049.99,
                 'Ref: SM-S928B/DS', '''<p>Un diseño de referencia con ADN Galaxy.</p>
                 <p>El Galaxy S24 Ultra presenta el diseño icónico y una batería de 5000 mAh.</p>
-                <div id="product-details"><table class="data-sheet">
+                ''', technical='''<h2>Ficha técnica</h2><table class="data-sheet">
                 <tr><th>Batería</th><td>5000mAh</td></tr>
                 <tr><th>Capacidad</th><td>512GB</td></tr>
-                <tr><th>RAM</th><td>12GB</td></tr></table></div>
+                <tr><th>RAM</th><td>12GB</td></tr></table>
                 <h3>Cambios y devoluciones</h3><p>GUANXE ofrece a sus clientes la posibilidad de ejercer su derecho de devolución.</p>''')
     result=extract_product_content(S24,html)
     assert result['extraction_status']=='ok',result
     p=result['product']
     assert p['sku']=='SM-S928B/DS'
     assert p['price']==1049.99 and p['brand']=='Samsung'
-    assert {(x['label'],x['value']) for x in p['specifications']} >= {('RAM','12GB'),('Batería','5000mAh'),('Capacidad','512GB')}
-    assert 'devolución' not in p['description']
+    assert 'Un diseño de referencia' in p['details_markdown']
+    assert 'devolución' not in p['details_markdown']
+    assert '## Ficha técnica' in p['technical_details_markdown']
+    assert ('| Batería | 5000mAh |' in p['technical_details_markdown']
+            and '| Capacidad | 512GB |' in p['technical_details_markdown'])
+    assert 'description' not in p and 'specifications' not in p
     assert any('temporalmente agotado' in x['text'] for x in p['availability_evidence'])
 
 
@@ -101,11 +112,13 @@ def test_flip_nested_technical_list_and_no_false_variant():
     assert result['extraction_status']=='ok',result
     p=result['product']
     assert p['sku']=='4040102798' and p['price']==899 and p['variant'] is None
-    specs={(x['group'],x['label'],x['value']) for x in p['specifications']}
-    assert ('Medios de almacenaje','Capacidad de RAM','8 GB') in specs
-    assert ('Exhibición','Diagonal de la pantalla','17 cm (6.7")') in specs
+    assert '**Exhibición:**' in p['details_markdown']
+    assert 'Diagonal de la pantalla: 17 cm (6.7")' in p['details_markdown']
+    assert 'Capacidad de RAM: 8 GB' in p['details_markdown']
+    assert p['technical_details_markdown'] is None
     assert 'field_truncated' not in result['warnings']
-    assert len(p['description'])<5000 and 'devolución' not in p['description']
+    assert 'devolución' not in p['details_markdown']
+    assert 'Promoción' not in p['details_markdown']
 
 
 def test_conflicting_visible_refs_do_not_leak_related_product():
@@ -259,10 +272,10 @@ def test_nested_related_description_specs_and_stock_are_excluded():
     result = extract_product_content(JBL, html)
     product = result['product']
     assert product['sku'] == '30458'
-    assert 'wireless headphones' in product['description']
-    assert 'Recommended unrelated' not in product['description']
-    assert ('Bluetooth', '5.3') in {(x['label'], x['value']) for x in product['specifications']}
-    assert ('RAM', '999 GB') not in {(x['label'], x['value']) for x in product['specifications']}
+    assert 'wireless headphones' in product['details_markdown']
+    assert 'Recommended unrelated' not in product['details_markdown']
+    assert '| Bluetooth | 5.3 |' in product['details_markdown']
+    assert '999 GB' not in product['details_markdown']
     assert all('recommended' not in item['text'].casefold() for item in product['availability_evidence'])
 
 
@@ -361,6 +374,6 @@ def test_policy_table_not_collected_as_product_specs():
               <p>GUANXE ofrece a sus clientes la posibilidad de ejercer su derecho de devolución.</p>
               <table><tr><td>Plazo de devolución</td><td>14 días</td></tr></table>''')
     result=extract_product_content(JBL,html)
-    values={(x['label'],x['value']) for x in result['product']['specifications']}
-    assert ('Bluetooth','5.3') in values
-    assert ('Plazo de devolución','14 días') not in values
+    markdown = result['product']['details_markdown']
+    assert '| Bluetooth | 5.3 |' in markdown
+    assert 'Plazo de devolución' not in markdown

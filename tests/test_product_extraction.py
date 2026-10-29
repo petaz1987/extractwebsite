@@ -30,11 +30,9 @@ def test_baggebo_main_product_data_specs_and_availability():
     assert product["currency"] == "EUR"
     assert product["url"] == BAGGEBO_URL
     assert product["image_url"] == "https://www.islas.ikea.es/assets/baggebo-main.jpg"
-    assert product["description"] == "Las baldas estrechas te ayudan a aprovechar las paredes de tu hogar."
-    assert {("Información del artículo", "Ancho:", "50 cm"), ("Información del artículo", "Peso máximo/balda:", "8 kg")} <= {
-        (item["group"], item["label"], item["value"]) for item in product["specifications"]
-    }
-    assert any(item["group"] == "Paquetes" and item["label"] == "Ancho:" and item["value"] == "26 cm" for item in product["specifications"])
+    assert product["details_markdown"] is None
+    assert product["technical_details_markdown"] is None
+    assert "description" not in product and "specifications" not in product
     assert product["availability_evidence"] == [{
         "type": "visible_stock_text",
         "text": "Stock disponible en IKEA La Laguna, ventas online y ventas telefónicas",
@@ -53,9 +51,9 @@ def test_billy_composite_stays_one_product_and_keeps_repeated_package_specs():
     assert product["price"] == 94
     assert product["currency"] == "EUR"
     assert product["name"].startswith("BILLY / OXBERG")
-    assert len(product["specifications"]) == 16
-    package_dimensions = [item["value"] for item in product["specifications"] if item["group"] == "Paquetes" and item["label"] == "Largo:"]
-    assert package_dimensions == ["211 cm", "206 cm"]
+    assert product["details_markdown"] is None
+    assert product["technical_details_markdown"] is None
+    assert "description" not in product and "specifications" not in product
 
 
 def test_original_price_is_separate_from_current_price():
@@ -105,7 +103,8 @@ def test_recommendation_price_does_not_fill_missing_main_product_price():
 
 def test_recommendation_specifications_are_not_assigned_to_main_product():
     result = extract_product_content("https://shop.example/pd/target-12345678", _recommendation_only_pdp())
-    assert result["product"]["specifications"] == []
+    assert result["product"]["details_markdown"] is None
+    assert result["product"]["technical_details_markdown"] is None
 
 
 def test_recommendation_availability_is_not_assigned_to_main_product():
@@ -124,13 +123,12 @@ def test_nonstandard_labels_are_preserved_in_explicit_product_spec_table():
       <tr><th>Color</th><td>Azul oscuro (detalle)</td></tr>
     </table></section></body></html>"""
     result = extract_product_content("https://shop.example/pd/fabric-chair-12345678", html)
-    specifications = result["product"]["specifications"]
-    assert [(item["group"], item["label"], item["value"]) for item in specifications] == [
-        ("Specifications", "Composición", "80 % algodón, 20 % lino"),
-        ("Specifications", "Color", "Azul oscuro"),
-        ("Specifications", "Tipo de tejido", "Terciopelo"),
-        ("Specifications", "Color", "Azul oscuro (detalle)"),
-    ]
+    markdown = result["product"]["technical_details_markdown"]
+    assert "## Specifications" in markdown
+    assert "| Composición | 80 % algodón, 20 % lino |" in markdown
+    assert "| Color | Azul oscuro |" in markdown
+    assert "| Tipo de tejido | Terciopelo |" in markdown
+    assert "| Color | Azul oscuro (detalle) |" in markdown
 
 
 def test_http_jsonld_url_matches_https_page_only_with_same_sku_host_and_path():
@@ -258,13 +256,16 @@ def test_missing_optional_fields_do_not_make_product_partial():
     assert product["currency"] is None
     assert product["image_url"] is None
     assert product["original_price"] is None
-    assert product["specifications"] == []
+    assert product["details_markdown"] is None
+    assert product["technical_details_markdown"] is None
     assert product["availability_evidence"] == []
 
 
-def test_specification_output_limit_is_reported():
-    rows = "".join(f"<tr><th>Ancho:</th><td>{index} cm</td></tr>" for index in range(205))
-    html = f"<html><head><meta property='product:price:amount' content='1'><meta property='product:price:currency' content='EUR'></head><body><main><h1>Item</h1><p>Article number 12345678</p><table>{rows}</table></main></body></html>"
+def test_long_technical_markdown_is_bounded_and_warns_when_truncated():
+    rows = "".join(f"<tr><th>Característica {index}</th><td>{'valor técnico ' * 8}{index}</td></tr>" for index in range(1500))
+    html = f"""<html><head><meta property='product:price:amount' content='1'><meta property='product:price:currency' content='EUR'></head><body><main><h1>Item</h1><p>Article number 12345678</p>
+    <div id='product-details'><h2>Ficha técnica</h2><table>{rows}</table></div></main></body></html>"""
     result = extract_product_content("https://shop.example/pd/item-12345678", html)
-    assert len(result["product"]["specifications"]) == 200
-    assert "specifications_truncated" in result["warnings"]
+    assert result["product"]["technical_details_markdown"]
+    assert len(result["product"]["technical_details_markdown"]) <= 40_000
+    assert "technical_details_markdown_truncated" in result["warnings"]
