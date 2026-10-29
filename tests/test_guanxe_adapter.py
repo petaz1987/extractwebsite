@@ -17,7 +17,7 @@ S24 = 'https://guanxe.com/es/smartphones/712264-samsung-galaxy-s24-ultra-12gb-51
 FLIP = 'https://guanxe.com/es/smartphones/1047586-samsung-galaxy-z-flip-7-fe-5g-8gb-256gb-negro-sm-761b-8806097428367.html'
 
 
-def page(url, name, brand, price, summary, details, *, description=None, canonical=None, sku=None):
+def page(url, name, brand, price, summary, details, *, technical=None, description=None, canonical=None, sku=None):
     product = {'@type':'Product','name':name,'url':url,'brand':{'name':brand},
                'image':'https://cdn.guanxe.com/product.jpg',
                'offers':{'price':str(price),'priceCurrency':'EUR'},
@@ -33,7 +33,11 @@ def page(url, name, brand, price, summary, details, *, description=None, canonic
       <span>Advertencia: ¡Últimos artículos en inventario!</span>
       <p>Disponible en Canarias - Envío rápido - Garantía Oficial</p>
       </div></div>
+    <ul role="tablist"><li><a role="tab" href="#description">Más información</a></li>
+      {('<li><a role="tab" href="#product-details">Ficha técnica</a></li>' if technical is not None else '')}
+    </ul>
     <div id="description">{details}</div>
+    {(f'<div id="product-details">{technical}</div>' if technical is not None else '')}
     <aside class="related-products"><p>Ref: 999999</p><table><tr><td>RAM</td><td>999 GB</td></tr></table>
     <p>Stock disponible</p></aside></main></body></html>'''
 
@@ -58,11 +62,14 @@ def test_jbl_reference_table_description_and_canonical():
     assert p['sku']=='30458' and p['url']==JBL_CANON
     assert p['brand']=='JBL' and p['price']==54.99 and p['currency']=='EUR'
     assert p['variant'] is None
-    assert len([x for x in p['specifications'] if x['label']=='Tamaño del controlador'])==1
-    assert ('Versión de Bluetooth','5.3') in {(x['label'],x['value']) for x in p['specifications']}
-    assert ('EAN','1200130020902') in {(x['label'],x['value']) for x in p['specifications']}
-    assert 'devolución' not in p['description']
-    assert all('999' not in str(x) for x in p['specifications'])
+    assert 'Disfruta del sonido JBL Pure Bass' in p['details_markdown']
+    assert '| Especificación | Detalle |' in p['details_markdown']
+    assert '| Versión de Bluetooth | 5.3 |' in p['details_markdown']
+    assert 'EAN 1200130020902' in p['details_markdown']
+    assert 'devolución' not in p['details_markdown']
+    assert '999' not in p['details_markdown']
+    assert p['technical_details_markdown'] is None
+    assert 'description' not in p and 'specifications' not in p
     assert all('Disponible en Canarias' not in x['text'] for x in p['availability_evidence'])
     assert any('temporalmente agotado' in x['text'] for x in p['availability_evidence'])
 
@@ -71,18 +78,22 @@ def test_s24_reference_ficha_technical_specifications():
     html = page(S24,'SAMSUNG Galaxy S24 Ultra 12GB 512GB SM-S928B/DS','Samsung',1049.99,
                 'Ref: SM-S928B/DS', '''<p>Un diseño de referencia con ADN Galaxy.</p>
                 <p>El Galaxy S24 Ultra presenta el diseño icónico y una batería de 5000 mAh.</p>
-                <div id="product-details"><table class="data-sheet">
+                ''', technical='''<h2>Ficha técnica</h2><table class="data-sheet">
                 <tr><th>Batería</th><td>5000mAh</td></tr>
                 <tr><th>Capacidad</th><td>512GB</td></tr>
-                <tr><th>RAM</th><td>12GB</td></tr></table></div>
+                <tr><th>RAM</th><td>12GB</td></tr></table>
                 <h3>Cambios y devoluciones</h3><p>GUANXE ofrece a sus clientes la posibilidad de ejercer su derecho de devolución.</p>''')
     result=extract_product_content(S24,html)
     assert result['extraction_status']=='ok',result
     p=result['product']
     assert p['sku']=='SM-S928B/DS'
     assert p['price']==1049.99 and p['brand']=='Samsung'
-    assert {(x['label'],x['value']) for x in p['specifications']} >= {('RAM','12GB'),('Batería','5000mAh'),('Capacidad','512GB')}
-    assert 'devolución' not in p['description']
+    assert 'Un diseño de referencia' in p['details_markdown']
+    assert 'devolución' not in p['details_markdown']
+    assert '## Ficha técnica' in p['technical_details_markdown']
+    assert ('| Batería | 5000mAh |' in p['technical_details_markdown']
+            and '| Capacidad | 512GB |' in p['technical_details_markdown'])
+    assert 'description' not in p and 'specifications' not in p
     assert any('temporalmente agotado' in x['text'] for x in p['availability_evidence'])
 
 
@@ -95,12 +106,10 @@ def test_category_heading_does_not_become_specification_group(url, product_name,
     html = page(url, product_name, 'Brand', 54.99, 'Ref: 30458',
                 f'<h3>Herramientas para coche</h3><table>{rows}</table>')
     result = extract_product_content(url, html)
-    specs = result['product']['specifications']
-    assert len(specs) == row_count
-    assert {item['group'] for item in specs} == {'Technical specifications'}
-    assert {(item['label'], item['value']) for item in specs} == {
-        (f'Dato {i}', f'Valor {i}') for i in range(row_count)
-    }
+    markdown = result['product']['details_markdown']
+    assert markdown.count('| Dato ') == row_count
+    assert '| Dato 0 | Valor 0 |' in markdown
+    assert 'specifications' not in result['product']
 
 
 def test_out_of_stock_and_low_stock_preserve_both_and_warn_conflict():
@@ -124,7 +133,7 @@ def test_low_stock_alone_is_not_a_conflict_or_availability_confirmation():
     assert 'availability' not in result['product']
 
 
-def test_description_deduplicates_text_and_drops_search_promotion_and_navigation():
+def test_product_markdown_keeps_panel_text_and_drops_search_promotion_and_navigation():
     html = page(JBL, 'JBL Tune 527BT', 'JBL', 54.99, 'Ref: 30458', '''
         <p>Auriculares JBL con sonido Pure Bass y batería de larga duración.</p>
         <p>Auriculares JBL con sonido Pure Bass y batería de larga duración.</p>
@@ -132,72 +141,74 @@ def test_description_deduplicates_text_and_drops_search_promotion_and_navigation
         <nav><p>Inicio Auriculares Ofertas</p></nav>
         <p>Disponible en Canarias, envío rápido y garantía oficial.</p>''')
     result = extract_product_content(JBL, html)
-    description = result['product']['description']
-    assert description == 'Auriculares JBL con sonido Pure Bass y batería de larga duración.'
-    assert 'Resultados de búsqueda' not in description
-    assert 'Ofertas' not in description
+    details = result['product']['details_markdown']
+    assert details.count('Auriculares JBL con sonido Pure Bass y batería de larga duración.') == 2
+    assert 'Resultados de búsqueda' not in details
+    assert 'Ofertas' not in details
+    assert 'description' not in result['product']
 
 
-def test_category_heading_is_not_added_to_description():
+def test_source_heading_hierarchy_is_preserved_in_details_markdown():
     html = page(JBL, 'JBL Tune 527BT', 'JBL', 54.99, 'Ref: 30458', '''
         <h3>Herramientas para coche</h3>
         <p>Auriculares JBL con sonido Pure Bass y batería de larga duración.</p>''')
     result = extract_product_content(JBL, html)
-    assert result['product']['description'] == (
-        'Auriculares JBL con sonido Pure Bass y batería de larga duración.'
-    )
+    details = result['product']['details_markdown']
+    assert '### Herramientas para coche' in details
+    assert 'Auriculares JBL con sonido Pure Bass y batería de larga duración.' in details
 
 
-def test_metadata_description_removes_repeated_seo_sentences():
+def test_metadata_description_is_not_used_as_product_section_content():
     repeated = 'Compra online miles de productos. '
     html = page(JBL, 'JBL Tune 527BT', 'JBL', 54.99, 'Ref: 30458',
-                '<p>Más información</p>', description=(
+                '', description=(
                     'Auriculares JBL con sonido Pure Bass. ' + repeated * 3
                     + 'Resultados de búsqueda de productos relacionados.'))
     result = extract_product_content(JBL, html)
-    assert result['product']['description'] == 'Auriculares JBL con sonido Pure Bass.'
+    assert result['product']['details_markdown'] is None
+    assert 'description' not in result['product']
 
 
-def test_untruncated_trusted_description_recovers_text_after_5000_chars():
+def test_long_metadata_description_is_not_promoted_to_details_markdown():
     boilerplate = 'Resultados de búsqueda de productos relacionados con JBL. '
     useful = 'Los auriculares JBL Tune 527BT ofrecen sonido Pure Bass y batería duradera.'
     html = page(JBL, 'JBL Tune 527BT', 'JBL', 54.99, 'Ref: 30458',
-                '<p>Más información</p>',
+                '',
                 description=(boilerplate * 105) + useful)
     result = extract_product_content(JBL, html)
-    assert result['product']['description'] == useful
-    assert 'field_truncated' not in result['warnings']
+    assert result['product']['details_markdown'] is None
+    assert useful not in str(result['product'])
 
 
-def test_trusted_description_recovers_text_after_10000_chars():
+def test_metadata_text_after_10000_chars_is_not_promoted_to_details_markdown():
     boilerplate = 'Resultados de búsqueda de productos relacionados con JBL. '
     useful = 'Los JBL Tune 527BT ofrecen sonido Pure Bass y batería duradera.'
     source = (boilerplate * 200) + useful
     assert 10000 < source.index(useful) < 20000
     html = page(JBL, 'JBL Tune 527BT', 'JBL', 54.99, 'Ref: 30458',
-                '<p>Más información</p>', description=source)
+                '', description=source)
     result = extract_product_content(JBL, html)
-    assert result['product']['description'] == useful
-    assert 'field_truncated' not in result['warnings']
+    assert result['product']['details_markdown'] is None
+    assert useful not in str(result['product'])
 
 
-def test_source_description_cap_keeps_truncation_warning_and_drops_seo_only_text():
+def test_oversized_metadata_description_is_not_returned_as_product_content():
     boilerplate = 'Resultados de búsqueda de productos relacionados con JBL. '
     useful_beyond_cap = 'Los auriculares ofrecen sonido JBL Pure Bass.'
     html = page(JBL, 'JBL Tune 527BT', 'JBL', 54.99, 'Ref: 30458',
-                '<p>Más información</p>',
+                '',
                 description=(boilerplate * 500) + useful_beyond_cap)
     result = extract_product_content(JBL, html)
-    assert result['product']['description'] is None
-    assert 'field_truncated' in result['warnings']
+    assert result['product']['details_markdown'] is None
+    assert 'description' not in result['product']
 
 
-def test_single_description_paragraph_deduplicates_repeated_sentences():
+def test_single_details_paragraph_is_preserved_in_markdown():
     sentence = 'Auriculares JBL con sonido Pure Bass.'
     html = page(JBL, 'JBL Tune 527BT', 'JBL', 54.99, 'Ref: 30458',
                 f'<p>{sentence} {sentence} {sentence}</p>')
     result = extract_product_content(JBL, html)
-    assert result['product']['description'] == sentence
+    assert result['product']['details_markdown'] == ' '.join([sentence] * 3)
 
 
 def test_flip_generic_or_url_identifier_is_not_merchant_ref():
@@ -226,11 +237,13 @@ def test_flip_nested_technical_list_and_no_false_variant():
     assert result['extraction_status']=='ok',result
     p=result['product']
     assert p['sku']=='4040102798' and p['price']==899 and p['variant'] is None
-    specs={(x['group'],x['label'],x['value']) for x in p['specifications']}
-    assert ('Medios de almacenaje','Capacidad de RAM','8 GB') in specs
-    assert ('Exhibición','Diagonal de la pantalla','17 cm (6.7")') in specs
+    assert '**Exhibición:**' in p['details_markdown']
+    assert r'Diagonal de la pantalla: 17 cm \(6.7"\)' in p['details_markdown']
+    assert 'Capacidad de RAM: 8 GB' in p['details_markdown']
+    assert p['technical_details_markdown'] is None
     assert 'field_truncated' not in result['warnings']
-    assert len(p['description'])<5000 and 'devolución' not in p['description']
+    assert 'devolución' not in p['details_markdown']
+    assert 'Promoción' not in p['details_markdown']
 
 
 def test_conflicting_visible_refs_do_not_leak_related_product():
@@ -346,7 +359,7 @@ def test_jsonld_for_different_guanxe_product_is_not_associated():
     assert product['price'] is None
     assert product['currency'] is None
     assert result['extraction_status'] == 'partial'
-    assert 'UNRELATED SAMSUNG DESCRIPTION' not in (product['description'] or '')
+    assert 'UNRELATED SAMSUNG DESCRIPTION' not in str(product['details_markdown'])
 
 
 def test_related_product_ref_and_article_number_do_not_become_sku():
@@ -376,7 +389,7 @@ def test_nested_related_description_specs_and_stock_are_excluded():
     )
     html = html.replace(
         '</body>',
-        '''<aside class="related-products"><div id="description">
+        '''<aside class="related-products"><div id="recommended-description">
         <p>Recommended unrelated product description that must not replace JBL details.</p>
         <h3>Especificaciones Técnicas</h3>
         <table><tr><th>RAM</th><td>999 GB</td></tr></table>
@@ -386,10 +399,10 @@ def test_nested_related_description_specs_and_stock_are_excluded():
     result = extract_product_content(JBL, html)
     product = result['product']
     assert product['sku'] == '30458'
-    assert 'wireless headphones' in product['description']
-    assert 'Recommended unrelated' not in product['description']
-    assert ('Bluetooth', '5.3') in {(x['label'], x['value']) for x in product['specifications']}
-    assert ('RAM', '999 GB') not in {(x['label'], x['value']) for x in product['specifications']}
+    assert 'wireless headphones' in product['details_markdown']
+    assert 'Recommended unrelated' not in product['details_markdown']
+    assert '| Bluetooth | 5.3 |' in product['details_markdown']
+    assert '999 GB' not in product['details_markdown']
     assert all('recommended' not in item['text'].casefold() for item in product['availability_evidence'])
 
 
@@ -488,6 +501,6 @@ def test_policy_table_not_collected_as_product_specs():
               <p>GUANXE ofrece a sus clientes la posibilidad de ejercer su derecho de devolución.</p>
               <table><tr><td>Plazo de devolución</td><td>14 días</td></tr></table>''')
     result=extract_product_content(JBL,html)
-    values={(x['label'],x['value']) for x in result['product']['specifications']}
-    assert ('Bluetooth','5.3') in values
-    assert ('Plazo de devolución','14 días') not in values
+    markdown = result['product']['details_markdown']
+    assert '| Bluetooth | 5.3 |' in markdown
+    assert 'Plazo de devolución' not in markdown
