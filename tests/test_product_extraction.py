@@ -138,7 +138,7 @@ def test_nonstandard_labels_are_preserved_in_explicit_product_spec_table():
     assert "| Composición | 80 % algodón, 20 % lino |" in markdown
     assert "| Color | Azul oscuro |" in markdown
     assert "| Tipo de tejido | Terciopelo |" in markdown
-    assert "| Color | Azul oscuro (detalle) |" in markdown
+    assert r"| Color | Azul oscuro \(detalle\) |" in markdown
 
 
 def test_http_jsonld_url_matches_https_page_only_with_same_sku_host_and_path():

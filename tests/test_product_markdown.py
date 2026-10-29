@@ -9,9 +9,8 @@ def _page(content, *, extra=""):
       <meta property='product:price:amount' content='24.99'>
       <meta property='product:price:currency' content='EUR'>
     </head><body><main><article class='product-detail'>
-      <h1>Example product</h1><p>Article number 12345678</p>
-    </article>
-    {content}{extra}</main></body></html>"""
+      <h1>Example product</h1><p>Article number 12345678</p>{content}
+    </article>{extra}</main></body></html>"""
 
 
 def test_tab_relationships_split_details_from_separate_technical_panel():
@@ -183,3 +182,145 @@ def test_long_technical_section_is_not_cut_at_legacy_description_limit():
     markdown = extract_product_content(URL, html)["product"]["technical_details_markdown"]
     assert len(markdown) > 5_000
     assert "Parameter 99" in markdown
+
+
+def test_other_product_tabs_and_duplicate_target_ids_do_not_contaminate_main_product():
+    html = _page("""
+      <a role='tab' href='#main-details'>Más información</a>
+      <section id='main-details'><p>Main product narrative.</p></section>
+      <article class='product-card'><h2>Other item</h2>
+        <button role='tab' aria-controls='other-tech'>Ficha técnica</button>
+        <section id='other-tech'><table><tr><th>Other RAM</th><td>999 GB</td></tr></table></section>
+      </article>
+      <aside class='recommendations'><div id='duplicate'>wrong</div></aside>
+      <div id='duplicate'>also wrong</div>
+    """)
+    product = extract_product_content(URL, html)["product"]
+    assert product["details_markdown"] == "Main product narrative."
+    assert product["technical_details_markdown"] is None
+    assert "Other RAM" not in str(product)
+
+
+def test_both_panel_nesting_directions_keep_every_selected_section():
+    html = _page("""
+      <a role='tab' href='#outer-tech'>Ficha técnica</a>
+      <a role='tab' href='#inner-details'>Más información</a>
+      <section id='outer-tech'><h2>Ficha técnica</h2><p>RAM 12 GB</p>
+        <div id='inner-details'><p>Product narrative.</p></div><p>Batería 5000 mAh</p>
+      </section>
+    """)
+    product = extract_product_content(URL, html)["product"]
+    assert "Product narrative." in product["details_markdown"]
+    assert "RAM 12 GB" in product["technical_details_markdown"]
+    assert "Batería 5000 mAh" in product["technical_details_markdown"]
+
+    reverse = _page("""
+      <a role='tab' href='#outer-details'>Más información</a>
+      <a role='tab' href='#inner-tech'>Ficha técnica</a>
+      <section id='outer-details'><p>Product narrative.</p>
+        <div id='inner-tech'><table><tr><th>RAM</th><td>12 GB</td></tr></table></div>
+      </section>
+    """)
+    product = extract_product_content(URL, reverse)["product"]
+    assert "Product narrative." in product["details_markdown"]
+    assert "| RAM | 12 GB |" in product["technical_details_markdown"]
+
+
+def test_heading_led_sections_work_in_plain_div_and_hidden_tab_wrapper():
+    html = _page("""
+      <div><h2>Información del artículo</h2>
+        <table><tr><th>Altura</th><td>160 cm</td></tr></table>
+      </div>
+      <button role='tab' aria-controls='hidden-tech'>Ficha técnica</button>
+      <div hidden><section id='hidden-tech'><p>Conectividad Wi-Fi 6</p></section></div>
+    """)
+    product = extract_product_content(URL, html)["product"]
+    assert "| Altura | 160 cm |" in product["technical_details_markdown"]
+    assert "Conectividad Wi-Fi 6" in product["technical_details_markdown"]
+
+
+def test_deep_inline_and_malformed_href_are_bounded_and_nonfatal():
+    deep = "<span>" * 400 + "Deep text" + "</span>" * 400
+    html = _page(f"<div id='description'><p>{deep}</p></div>")
+    result = extract_product_content(URL, html)
+    assert result["product"]["details_markdown"] is None
+    assert "details_markdown_truncated" in result["warnings"]
+    malformed = extract_product_content(
+        URL, _page("<div id='description'><p>Text <a href='https://['>manual</a></p></div>")
+    )
+    assert "Text manual" in malformed["product"]["details_markdown"]
+
+
+def test_wrapped_nested_lists_and_rowspan_colspan_associations_are_preserved():
+    html = _page("""
+      <div id='description'><ul><li>Connectivity<div><ul><li>Wi-Fi 6</li><li>Bluetooth 5.3</li></ul></div></li></ul></div>
+      <div id='product-details'><table><tr><th>Group</th><th>Label</th><th>Value</th></tr>
+        <tr><td rowspan='2'>Display</td><td>Width</td><td>60 cm</td></tr>
+        <tr><td colspan='2'>Height: 40 cm</td></tr></table></div>
+    """)
+    product = extract_product_content(URL, html)["product"]
+    assert "Connectivity" in product["details_markdown"]
+    assert "  - Wi-Fi 6" in product["details_markdown"]
+    assert "  - Bluetooth 5.3" in product["details_markdown"]
+    assert "| Display | Height: 40 cm | Height: 40 cm |" in product["technical_details_markdown"]
+
+
+def test_markdown_delimiters_in_plain_source_and_link_labels_are_escaped():
+    html = _page("""
+      <div id='description'><p>literal [label](javascript:alert(1)) and *stars*</p>
+        <a href='https://safe.example'>Manual](javascript:alert%281%29) [safe</a></div>
+    """)
+    markdown = extract_product_content(URL, html)["product"]["details_markdown"]
+    assert r"\[label\]\(javascript:alert\(1\)\)" in markdown
+    assert r"\*stars\*" in markdown
+    assert "javascript:alert%281%29) [safe](https://safe.example)" not in markdown
+
+
+def test_html_comments_are_not_rendered():
+    html = _page("<div id='description'><p>Visible product content</p><!-- hidden merchant note --></div>")
+    markdown = extract_product_content(URL, html)["product"]["details_markdown"]
+    assert markdown == "Visible product content"
+    assert "hidden merchant note" not in markdown
+
+
+def test_duplicate_ids_remain_unresolved_but_overlapping_selectors_do_not_drop_data():
+    duplicate = _page("""
+      <button role='tab' aria-controls='same-target'>Ficha técnica</button>
+      <section id='same-target'><p>First ambiguous target</p></section>
+      <section id='same-target'><p>Second ambiguous target</p></section>
+    """)
+    result = extract_product_content(URL, duplicate)
+    assert result["product"]["technical_details_markdown"] is None
+    assert "technical_details_extraction_failed" in result["warnings"]
+
+    overlap = _page("""
+      <a role='tab' href='#all-details'>Más información</a>
+      <section id='all-details'><p>Before technical panel</p>
+        <section id='product-details'><p>RAM 12 GB</p></section>
+        <p>After technical panel</p></section>
+      <a role='tab' href='#product-details'>Ficha técnica</a>
+    """)
+    product = extract_product_content(URL, overlap)["product"]
+    assert "Before technical panel" in product["details_markdown"]
+    assert "After technical panel" in product["details_markdown"]
+    assert "RAM 12 GB" in product["technical_details_markdown"]
+
+
+def test_identical_package_sections_are_preserved_in_source_order():
+    package = "<section><h2>Paquetes</h2><table><tr><th>Peso</th><td>10 kg</td></tr></table></section>"
+    html = _page(package + package)
+    markdown = extract_product_content(URL, html)["product"]["technical_details_markdown"]
+    assert markdown.count("## Paquetes") == 2
+    assert markdown.index("## Paquetes") < markdown.rindex("## Paquetes")
+
+
+def test_navigation_category_heading_is_excluded_and_product_headings_survive():
+    html = _page("""
+      <section><nav><h2>Herramientas para coche</h2></nav>
+        <h2>Ficha técnica</h2><p>Medidas del producto</p>
+      </section>
+    """)
+    markdown = extract_product_content(URL, html)["product"]["technical_details_markdown"]
+    assert "Herramientas para coche" not in markdown
+    assert "## Ficha técnica" in markdown
+    assert "Medidas del producto" in markdown

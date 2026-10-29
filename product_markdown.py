@@ -1,10 +1,11 @@
 """Bounded, source-faithful Markdown extraction for product content panels."""
 
+import html
 import re
 import unicodedata
-from urllib.parse import unquote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
-from bs4 import BeautifulSoup, NavigableString, Tag
+from bs4 import BeautifulSoup, Comment, NavigableString, Tag
 
 
 MAX_PRODUCT_SECTION_LENGTH = 40_000
@@ -34,7 +35,7 @@ _TECH_PANEL_MARKERS = (
 )
 _UNRELATED_MARKERS = (
     "related", "recommend", "upsell", "crosssell", "productcarousel", "productlist",
-    "suggestion", "recentlyviewed", "complementary", "youmaylike", "accessor", "reviews",
+    "suggestion", "recentlyviewed", "complementary", "youmaylike", "reviews",
     "questions", "newsletter", "footer", "breadcrumb", "navigation", "nav-", "seo", "keywords",
 )
 _SKIP_TAGS = {
@@ -95,7 +96,7 @@ def _is_unrelated(node, *, trusted_hidden=(), allow_hidden_node=False):
     return False
 
 
-def _fragment_targets(document, control):
+def _fragment_targets(id_index, control):
     targets = []
     fragment = None
     href = control.get("href")
@@ -112,7 +113,7 @@ def _fragment_targets(document, control):
         targets.append(fragment)
     result = []
     for target_id in dict.fromkeys(targets):
-        matches = document.find_all(id=target_id, limit=2)
+        matches = id_index.get(target_id, ())
         if len(matches) == 1 and isinstance(matches[0], Tag):
             result.append(matches[0])
     return result
@@ -124,26 +125,48 @@ def _append_unique(mapping, kind, node):
         items.append(node)
 
 
-def _collect_panels(document):
+def _collect_panels(document, context):
     panels = {"details_markdown": [], "technical_details_markdown": []}
     missing = set()
-    controls = document.find_all(
-        lambda node: isinstance(node, Tag) and (
-            node.get("role") == "tab" or node.has_attr("aria-controls")
-            or (node.name == "a" and isinstance(node.get("href"), str) and node["href"].startswith("#"))
-            or node.has_attr("data-target") or node.has_attr("data-bs-target")
-        ),
-        limit=MAX_PANEL_REFERENCES + 1,
-    )
-    if len(controls) > MAX_PANEL_REFERENCES:
-        controls = controls[:MAX_PANEL_REFERENCES]
+    id_index = {}
+    controls = []
+    indexed_nodes = 0
+    index_truncated = False
+    for node in document.find_all(True):
+        indexed_nodes += 1
+        if indexed_nodes > 20_000:
+            index_truncated = True
+            break
+        node_id = node.get("id")
+        if node_id:
+            values = id_index.setdefault(str(node_id), [])
+            if len(values) < 2:
+                values.append(node)
+        if (node.get("role") == "tab" or node.has_attr("aria-controls")
+                or (node.name == "a" and isinstance(node.get("href"), str) and node["href"].startswith("#"))
+                or node.has_attr("data-target") or node.has_attr("data-bs-target")):
+            controls.append(node)
+            if len(controls) > MAX_PANEL_REFERENCES:
+                missing.add("references_truncated")
+                controls.pop()
+    if index_truncated:
         missing.add("references_truncated")
+    main = context.find_parent("main") if isinstance(context, Tag) else None
     for control in controls:
         if _is_unrelated(control):
             continue
+        control_product = control.find_parent(["article"])
+        context_product = context if isinstance(context, Tag) and context.name == "article" else (
+            context.find_parent("article") if isinstance(context, Tag) else None
+        )
+        control_main = control.find_parent("main")
+        if control_product is not None and control_product is not context_product:
+            continue
+        if control_product is None and (main is None or control_main is not main):
+            continue
         label = control.get("aria-label") or control.get("title") or control.get_text(" ", strip=True)
         kind = _classify_label(label)
-        targets = _fragment_targets(document, control)
+        targets = _fragment_targets(id_index, control)
         if kind is None:
             kind = next((_panel_kind(target) for target in targets if _panel_kind(target)), None)
         if kind is None:
@@ -152,8 +175,21 @@ def _collect_panels(document):
             missing.add(kind)
             continue
         for target in targets:
+            target_product = target.find_parent("article")
+            if target_product is not None and target_product is not context_product:
+                continue
             if not _is_unrelated(target, allow_hidden_node=True):
                 _append_unique(panels, kind, target)
+            elif not any(marker in " ".join(target.get("class", [])).casefold() for marker in _UNRELATED_MARKERS):
+                # Inactive tabs can be wrapped in a hidden region. Trust only the
+                # hidden ancestors on this explicitly linked target's own chain.
+                ancestors = [target]
+                ancestors.extend(parent for parent in target.parents if isinstance(parent, Tag))
+                if any(ancestor is main for ancestor in ancestors):
+                    hidden_roots = [ancestor for ancestor in ancestors
+                                    if ancestor.has_attr("hidden") or str(ancestor.get("aria-hidden", "")).casefold() == "true"]
+                    if hidden_roots and not any(_is_unrelated(ancestor, allow_hidden_node=True) for ancestor in hidden_roots):
+                        _append_unique(panels, kind, target)
     return panels, missing
 
 
@@ -219,7 +255,7 @@ def _fallback_panels(document, context, panels):
             kind = _classify_label(heading.get_text(" ", strip=True))
             if kind is None:
                 continue
-            container = heading.find_parent(["section", "details"])
+            container = heading.find_parent(["section", "details", "div"])
             if container is None or context not in container.parents:
                 continue
             if _is_unrelated(container):
@@ -236,10 +272,17 @@ def _fallback_panels(document, context, panels):
     return scan_truncated
 
 
-def _inline(node, *, excluded=None, trusted_hidden=()):
+def _inline(node, *, excluded=None, trusted_hidden=(), budget=None, depth=0):
     excluded = excluded or set()
+    if budget is not None:
+        budget[0] += 1
+        if depth > 64 or budget[0] > MAX_RENDERED_NODES:
+            budget[1] = True
+            return ""
+    if isinstance(node, Comment):
+        return ""
     if isinstance(node, NavigableString):
-        return str(node)
+        return _escape_markdown(str(node))
     if (not isinstance(node, Tag) or id(node) in excluded or node.name in _SKIP_TAGS
             or _is_unrelated(node, trusted_hidden=trusted_hidden)):
         return ""
@@ -247,8 +290,9 @@ def _inline(node, *, excluded=None, trusted_hidden=()):
         return _BR
     if node.name == "img":
         alt = " ".join(str(node.get("alt", "")).split())
-        return alt
-    content = "".join(_inline(child, excluded=excluded, trusted_hidden=trusted_hidden) for child in node.children)
+        return _escape_markdown(alt)
+    content = "".join(_inline(child, excluded=excluded, trusted_hidden=trusted_hidden,
+                              budget=budget, depth=depth + 1) for child in node.children)
     content = re.sub(r"[ \t\r\f\v]+", " ", content).strip()
     if not content:
         return ""
@@ -260,12 +304,24 @@ def _inline(node, *, excluded=None, trusted_hidden=()):
         return f"`{content}`"
     if node.name == "a":
         href = str(node.get("href", "")).strip()
-        scheme = urlsplit(href).scheme.casefold()
+        try:
+            scheme = urlsplit(href).scheme.casefold()
+        except (TypeError, ValueError):
+            return content
         safe_scheme = scheme in {"http", "https", "mailto"}
         safe_relative = not scheme and not href.startswith("//")
         if href and (safe_scheme or safe_relative):
-            return f"[{content}]({href})"
+            safe_href = quote(href, safe=":/?#[]@!$&'*+,;=%-._~")
+            return f"[{content}]({safe_href})"
+    if node.name in {"a", "strong", "b", "em", "i", "code"}:
+        return content
     return content
+
+
+def _escape_markdown(value):
+    value = str(value)
+    value = re.sub(r"([\\`*_{}\[\]()])", r"\\\1", value)
+    return value
 
 
 class _MarkdownRenderer:
@@ -283,7 +339,10 @@ class _MarkdownRenderer:
         return not _is_unrelated(node, trusted_hidden=self.trusted_hidden) and id(node) not in self.excluded
 
     def _inline(self, node, excluded=None):
-        value = _inline(node, excluded=self.excluded | (excluded or set()), trusted_hidden=self.trusted_hidden)
+        budget = [0, False]
+        value = _inline(node, excluded=self.excluded | (excluded or set()),
+                        trusted_hidden=self.trusted_hidden, budget=budget)
+        self.truncated = self.truncated or budget[1]
         return "  \n".join(" ".join(line.split()) for line in value.split(_BR)).strip()
 
     def _table(self, table):
@@ -292,14 +351,38 @@ class _MarkdownRenderer:
             rows = rows[:MAX_TABLE_ROWS]
             self.truncated = True
         parsed = []
+        rowspans = {}
         for row in rows:
             if not self._visit(row):
                 continue
             cells = row.find_all(["th", "td"], recursive=False)
-            if not cells:
-                cells = row.find_all(["th", "td"])
-            if cells:
-                parsed.append([self._inline(cell) for cell in cells])
+            values, column = [], 0
+            for cell in cells:
+                while column in rowspans and rowspans[column][1] > 0:
+                    value, remaining = rowspans[column]
+                    values.append(value)
+                    rowspans[column] = (value, remaining - 1)
+                    column += 1
+                value = self._inline(cell)
+                try:
+                    colspan = min(20, max(1, int(cell.get("colspan", 1) or 1)))
+                    rowspan = min(MAX_TABLE_ROWS, max(1, int(cell.get("rowspan", 1) or 1)))
+                except (TypeError, ValueError):
+                    colspan = rowspan = 1
+                values.extend([value] * colspan)
+                if rowspan > 1:
+                    for offset in range(colspan):
+                        rowspans[column + offset] = (value, rowspan - 1)
+                column += colspan
+            for col in sorted(tuple(rowspans)):
+                if col >= column and rowspans[col][1] > 0:
+                    value, remaining = rowspans[col]
+                    while len(values) <= col:
+                        values.append("")
+                    values[col] = value
+                    rowspans[col] = (value, remaining - 1)
+            if values:
+                parsed.append(values)
         parsed = [row for row in parsed if any(row)]
         if not parsed:
             return ""
@@ -338,7 +421,13 @@ class _MarkdownRenderer:
             if not self._visit(item):
                 continue
             prefix = "  " * depth + (f"{start + item_index}. " if ordered else "- ")
-            nested = item.find_all(["ul", "ol"], recursive=False)
+            nested = []
+            for candidate in item.find_all(["ul", "ol"]):
+                parent = candidate.parent
+                while isinstance(parent, Tag) and parent is not item and parent.name not in {"ul", "ol"}:
+                    parent = parent.parent
+                if parent is item:
+                    nested.append(candidate)
             label = self._inline(item, excluded={id(child) for child in nested})
             if label:
                 lines.append(prefix + label)
@@ -383,9 +472,9 @@ class _MarkdownRenderer:
 
         blocks, inline = [], []
         for child in node.children:
-            if isinstance(child, NavigableString):
+            if isinstance(child, NavigableString) and not isinstance(child, Comment):
                 if str(child).strip():
-                    inline.append(str(child))
+                    inline.append(_escape_markdown(str(child)))
                 continue
             if not isinstance(child, Tag) or not self._visit(child):
                 continue
@@ -437,9 +526,9 @@ class _MarkdownRenderer:
             return f"{'#' * int(node.name[1])} {text}"
         blocks, inline = [], []
         for child in node.children:
-            if isinstance(child, NavigableString):
+            if isinstance(child, NavigableString) and not isinstance(child, Comment):
                 if str(child).strip():
-                    inline.append(str(child))
+                    inline.append(_escape_markdown(str(child)))
             elif isinstance(child, Tag) and self._visit(child):
                 if child.name in {"h1", "h2", "h3", "h4", "h5", "h6", "p"} and _POLICY.match(self._inline(child)):
                     break
@@ -472,7 +561,7 @@ def _render_sections(nodes, excluded, limit, trusted_hidden=()):
         truncated = truncated or renderer.truncated
         if content:
             rendered.append(content)
-    text = "\n\n".join(dict.fromkeys(rendered)).strip()
+    text = "\n\n".join(rendered).strip()
     if len(text) > limit:
         truncated = True
         cut = text.rfind("\n", 0, limit)
@@ -484,9 +573,12 @@ def _render_sections(nodes, excluded, limit, trusted_hidden=()):
 
 def extract_product_markdown(document, context):
     """Return product-section Markdown and safe warnings from one parsed page."""
-    panels, missing = _collect_panels(document)
-    trusted_hidden = [node for nodes in panels.values() for node in nodes
-                      if node.has_attr("hidden") or str(node.get("aria-hidden", "")).casefold() == "true"]
+    panels, missing = _collect_panels(document, context)
+    trusted_hidden = []
+    for nodes in panels.values():
+        for node in nodes:
+            trusted_hidden.extend(parent for parent in [node, *node.parents] if isinstance(parent, Tag)
+                                  and (parent.has_attr("hidden") or str(parent.get("aria-hidden", "")).casefold() == "true"))
     scan_truncated = _fallback_panels(document, context, panels)
     warnings = []
     if "references_truncated" in missing or scan_truncated:
@@ -499,9 +591,8 @@ def extract_product_markdown(document, context):
     technical_nodes = panels["technical_details_markdown"]
     # Nested targets belong to one panel. Keep the content in its outer section
     # rather than duplicating it across the two response fields.
-    if any(details in technical.parents or technical in details.parents
-           for details in details_nodes for technical in technical_nodes):
-        technical_nodes = []
+    # Render both targets independently and exclude each selected child from its
+    # ancestor panel; an overlap must never discard the outer content owner.
 
     details, details_truncated = _render_sections(
         details_nodes, technical_nodes, MAX_PRODUCT_SECTION_LENGTH, trusted_hidden,

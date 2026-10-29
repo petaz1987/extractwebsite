@@ -238,7 +238,7 @@ def test_flip_nested_technical_list_and_no_false_variant():
     p=result['product']
     assert p['sku']=='4040102798' and p['price']==899 and p['variant'] is None
     assert '**Exhibición:**' in p['details_markdown']
-    assert 'Diagonal de la pantalla: 17 cm (6.7")' in p['details_markdown']
+    assert r'Diagonal de la pantalla: 17 cm \(6.7"\)' in p['details_markdown']
     assert 'Capacidad de RAM: 8 GB' in p['details_markdown']
     assert p['technical_details_markdown'] is None
     assert 'field_truncated' not in result['warnings']
