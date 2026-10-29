@@ -201,6 +201,22 @@ def test_other_product_tabs_and_duplicate_target_ids_do_not_contaminate_main_pro
     assert "Other RAM" not in str(product)
 
 
+def test_div_product_card_tabs_cannot_contaminate_selected_product():
+    html = _page("""
+      <a role='tab' href='#main-details'>Más información</a>
+      <section id='main-details'><p>Main product narrative.</p></section>
+    """, extra="""
+      <div class='product-card'><h2>Other item</h2>
+        <button role='tab' aria-controls='other-tech'>Ficha técnica</button>
+        <section id='other-tech'><table><tr><th>Other RAM</th><td>999 GB</td></tr></table></section>
+      </div>
+    """)
+    product = extract_product_content(URL, html)["product"]
+    assert product["details_markdown"] == "Main product narrative."
+    assert product["technical_details_markdown"] is None
+    assert "Other RAM" not in str(product)
+
+
 def test_both_panel_nesting_directions_keep_every_selected_section():
     html = _page("""
       <a role='tab' href='#outer-tech'>Ficha técnica</a>
@@ -239,6 +255,32 @@ def test_heading_led_sections_work_in_plain_div_and_hidden_tab_wrapper():
     assert "Conectividad Wi-Fi 6" in product["technical_details_markdown"]
 
 
+def test_direct_heading_sibling_sections_work_in_article_and_product_div():
+    article = _page("""
+      <h2>Ficha técnica</h2>
+      <p>Valores principales</p>
+      <table><tr><th>RAM</th><td>12 GB</td></tr></table>
+      <h2>Recomendaciones</h2><p>Other product content</p>
+    """)
+    product = extract_product_content(URL, article)["product"]
+    assert "## Ficha técnica" in product["technical_details_markdown"]
+    assert "Valores principales" in product["technical_details_markdown"]
+    assert "| RAM | 12 GB |" in product["technical_details_markdown"]
+    assert "Other product content" not in product["technical_details_markdown"]
+
+    product_div = """<html><head>
+      <meta property='product:price:amount' content='24.99'>
+      <meta property='product:price:currency' content='EUR'></head><body><main>
+      <div class='product-detail'><h1>Example product</h1><p>Article number 12345678</p>
+        <h2>Ficha técnica</h2><ul><li>Peso: 5 kg</li></ul>
+        <h2>Cambios y devoluciones</h2><p>Policy text</p>
+      </div></main></body></html>"""
+    product = extract_product_content(URL, product_div)["product"]
+    assert "## Ficha técnica" in product["technical_details_markdown"]
+    assert "Peso: 5 kg" in product["technical_details_markdown"]
+    assert "Policy text" not in product["technical_details_markdown"]
+
+
 def test_deep_inline_and_malformed_href_are_bounded_and_nonfatal():
     deep = "<span>" * 400 + "Deep text" + "</span>" * 400
     html = _page(f"<div id='description'><p>{deep}</p></div>")
@@ -274,6 +316,19 @@ def test_markdown_delimiters_in_plain_source_and_link_labels_are_escaped():
     assert r"\[label\]\(javascript:alert\(1\)\)" in markdown
     assert r"\*stars\*" in markdown
     assert "javascript:alert%281%29) [safe](https://safe.example)" not in markdown
+
+
+def test_heading_list_and_html_like_source_text_are_rendered_literally():
+    html = _page("""
+      <div id='description'><p># Not a heading</p><p>- Not a list item</p>
+        <p>&lt;img src=x onerror=alert(1)&gt;</p>
+        <p>literal [link](https://evil.example) and \\ backslash</p></div>
+    """)
+    markdown = extract_product_content(URL, html)["product"]["details_markdown"]
+    assert r"\# Not a heading" in markdown
+    assert r"\- Not a list item" in markdown
+    assert r"\<img src=x onerror=alert\(1\)>" in markdown
+    assert r"\[link\]\(https://evil.example\)" in markdown
 
 
 def test_html_comments_are_not_rendered():

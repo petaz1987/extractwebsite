@@ -33,6 +33,10 @@ _TECH_PANEL_MARKERS = (
     "technical", "specification", "datasheet", "productspecifications", "productdetails",
     "productfeatures", "caracteristicastecnicas", "fichatecnica",
 )
+_PRODUCT_SCOPE_MARKERS = {
+    "productcard", "producttile", "productitem", "productdetail", "productinformation",
+    "pdp", "pip",
+}
 _UNRELATED_MARKERS = (
     "related", "recommend", "upsell", "crosssell", "productcarousel", "productlist",
     "suggestion", "recentlyviewed", "complementary", "youmaylike", "reviews",
@@ -96,6 +100,20 @@ def _is_unrelated(node, *, trusted_hidden=(), allow_hidden_node=False):
     return False
 
 
+def _product_scope(node):
+    """Return the nearest explicit product owner for a node, if present."""
+    current = node
+    while isinstance(current, Tag):
+        if current.name == "article":
+            return current
+        labels = [str(current.get("id", "")), *current.get("class", [])]
+        normalized = {re.sub(r"[^a-z0-9]", "", label.casefold()) for label in labels}
+        if normalized & _PRODUCT_SCOPE_MARKERS:
+            return current
+        current = current.parent
+    return None
+
+
 def _fragment_targets(id_index, control):
     targets = []
     fragment = None
@@ -152,15 +170,13 @@ def _collect_panels(document, context):
     if index_truncated:
         missing.add("references_truncated")
     main = context.find_parent("main") if isinstance(context, Tag) else None
+    context_scope = _product_scope(context) if isinstance(context, Tag) else None
     for control in controls:
         if _is_unrelated(control):
             continue
-        control_product = control.find_parent(["article"])
-        context_product = context if isinstance(context, Tag) and context.name == "article" else (
-            context.find_parent("article") if isinstance(context, Tag) else None
-        )
+        control_product = _product_scope(control)
         control_main = control.find_parent("main")
-        if control_product is not None and control_product is not context_product:
+        if control_product is not None and control_product is not context_scope:
             continue
         if control_product is None and (main is None or control_main is not main):
             continue
@@ -175,8 +191,8 @@ def _collect_panels(document, context):
             missing.add(kind)
             continue
         for target in targets:
-            target_product = target.find_parent("article")
-            if target_product is not None and target_product is not context_product:
+            target_product = _product_scope(target)
+            if target_product is not None and target_product is not context_scope:
                 continue
             if not _is_unrelated(target, allow_hidden_node=True):
                 _append_unique(panels, kind, target)
@@ -256,11 +272,30 @@ def _fallback_panels(document, context, panels):
             if kind is None:
                 continue
             container = heading.find_parent(["section", "details", "div"])
-            if container is None or context not in container.parents:
+            if container is not None and context in container.parents:
+                if not _is_unrelated(container):
+                    _append_unique(panels, kind, container)
                 continue
-            if _is_unrelated(container):
+            # Headings directly owned by the selected product wrapper form a
+            # bounded sibling section. Stop before the next peer heading,
+            # navigation/policy content, or unrelated wrapper.
+            if context not in heading.parents:
                 continue
-            _append_unique(panels, kind, container)
+            level = int(heading.name[1])
+            _append_unique(panels, kind, heading)
+            for sibling in heading.next_siblings:
+                if isinstance(sibling, NavigableString):
+                    continue
+                if not isinstance(sibling, Tag):
+                    continue
+                if re.fullmatch(r"h[1-6]", sibling.name or "") and int(sibling.name[1]) <= level:
+                    break
+                if _is_unrelated(sibling):
+                    break
+                sibling_text = sibling.get_text(" ", strip=True)
+                if sibling.name in {"p", "div"} and _POLICY.match(sibling_text):
+                    break
+                _append_unique(panels, kind, sibling)
     # A separate technical panel is only extracted as such when its own
     # target is outside the selected details panel. Embedded specs remain
     # part of the details Markdown.
@@ -311,7 +346,7 @@ def _inline(node, *, excluded=None, trusted_hidden=(), budget=None, depth=0):
         safe_scheme = scheme in {"http", "https", "mailto"}
         safe_relative = not scheme and not href.startswith("//")
         if href and (safe_scheme or safe_relative):
-            safe_href = quote(href, safe=":/?#[]@!$&'*+,;=%-._~")
+            safe_href = quote(href, safe=":/?#@$&'*+,;=%-._~")
             return f"[{content}]({safe_href})"
     if node.name in {"a", "strong", "b", "em", "i", "code"}:
         return content
@@ -320,7 +355,11 @@ def _inline(node, *, excluded=None, trusted_hidden=(), budget=None, depth=0):
 
 def _escape_markdown(value):
     value = str(value)
-    value = re.sub(r"([\\`*_{}\[\]()])", r"\\\1", value)
+    # Escape inline syntax in source text while preserving ordinary punctuation
+    # such as decimal points and hyphens within words (e.g. Wi-Fi, 5.3).
+    value = re.sub(r"([\\`*_{}\[\]()|])", r"\\\1", value)
+    value = re.sub(r"<", r"\\<", value)
+    value = re.sub(r"(?m)^([ \t]*)([#>]|-(?=\s))", r"\1\\\2", value)
     return value
 
 
